@@ -15,7 +15,7 @@ With `use-package` and `package-vc`:
 
 ```elisp
 (use-package android-mode
-  :vc (android-mode :url "https://github.com/chuxubank/emacs-android"
+  :vc (android-mode :url "https://github.com/chuxubank/emacs-studio"
                     :lisp-dir "android-mode/")
   :commands #'android-root)
 ```
@@ -23,7 +23,7 @@ With `use-package` and `package-vc`:
 From a local checkout:
 
 ```elisp
-(add-to-list 'load-path "/path/to/emacs-android/android-mode")
+(add-to-list 'load-path "/path/to/emacs-studio/android-mode")
 (require 'android-mode)
 ```
 
