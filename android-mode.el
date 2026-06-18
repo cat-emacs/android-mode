@@ -71,6 +71,13 @@ available."
                     (file-name-directory (or load-file-name buffer-file-name)))
   "Gradle init script path relative to this Emacs Lisp file.")
 
+(defvar android-mode-gradle-log-buffer-name "*android-gradle-log*"
+  "Buffer name used for synchronous android-mode Gradle output.")
+
+(defun android--log (format-string &rest args)
+  "Log android-mode message FORMAT-STRING with ARGS."
+  (apply #'message (concat "android-mode: " format-string) args))
+
 (defun android-root ()
   "Find the root directory of the Android project.
 The root is the directory containing the project's `gradlew` file."
@@ -151,11 +158,12 @@ Uses the modern `emulator -list-avds` command."
   (interactive)
   (let ((avd (or (and (not (string-blank-p android-mode-avd)) android-mode-avd)
                  (completing-read "Android Virtual Device: " (android-list-avd)))))
+    (android--log "starting emulator %s" avd)
     (unless (android-start-exclusive-command (format "*android-emulator-%s*" avd)
                                              (android-tool-path "emulator")
                                              "-avd"
                                              avd)
-      (message "Emulator for %s is already running or being started." avd))))
+      (android--log "emulator for %s is already running or being started" avd))))
 
 (defun android-current-buffer-class-name ()
   "Try to determine the fully qualified class name defined in the current buffer."
@@ -322,6 +330,7 @@ Per-project, keyed by project root.")
 (defun android--flavor-cache-save (root data)
   "Persist flavor DATA for project ROOT to disk."
   (let ((file (android--flavor-cache-file root)))
+    (android--log "saving flavor cache for %s to %s" root file)
     (make-directory (file-name-directory file) t)
     (with-temp-file file
       (prin1 (list :root root :time (current-time) :data data)
@@ -332,6 +341,7 @@ Per-project, keyed by project root.")
 Returns the data list, or nil if no valid cache exists."
   (let ((file (android--flavor-cache-file root)))
     (when (file-exists-p file)
+      (android--log "loading flavor cache for %s from %s" root file)
       (ignore-errors
         (with-temp-buffer
           (insert-file-contents file)
@@ -339,11 +349,30 @@ Returns the data list, or nil if no valid cache exists."
             (when (string= (plist-get plist :root) root)
               (plist-get plist :data))))))))
 
+(defun android--run-gradle-for-output (root command)
+  "Run Gradle COMMAND in ROOT visibly and return its output."
+  (android-in-directory
+   root
+   (let ((buffer (get-buffer-create android-mode-gradle-log-buffer-name)))
+     (android--log "running Gradle in %s: %s" root command)
+     (with-current-buffer buffer
+       (let ((inhibit-read-only t))
+         (erase-buffer)
+         (insert (format "$ %s\n\n" command)))
+       (setq-local default-directory root)
+       (display-buffer buffer)
+       (let ((exit-code (call-process-shell-command command nil buffer t)))
+         (android--log "Gradle command exited with code %s" exit-code)
+         (buffer-string))))))
+
 (defun android--get-flavors (&optional refresh)
   "Return flavor data as list of (MODULE VARIANT APPID).
 Caches in memory and on disk under `android-mode-cache-dir'.
 With REFRESH non-nil, re-fetch from gradle."
   (let ((root (android-root)))
+    (android--log "resolving flavors for %s%s"
+                  root
+                  (if refresh " with refresh" ""))
     (when (or refresh
               (not android--flavor-cache)
               (not (string= root android--flavor-cache-root)))
@@ -358,8 +387,9 @@ With REFRESH non-nil, re-fetch from gradle."
            (let* ((script android-mode-flavor-script)
                   (command (format "./gradlew --no-configuration-cache -I %s help --quiet"
                                    (shell-quote-argument script)))
-                  (output (shell-command-to-string command))
+                  (output (android--run-gradle-for-output root command))
                   (data (android-parse-gradle-flavors output)))
+             (android--log "parsed %d flavor entries" (length data))
              (setq android--flavor-cache data
                    android--flavor-cache-root root)
              (android--flavor-cache-save root data))))))
@@ -406,16 +436,20 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
 (defun android--select-module ()
   "Prompt user to select a module.  Returns module name string."
   (let ((modules (android--flavor-modules)))
-    (if (= (length modules) 1)
-        (car modules)
-      (completing-read "Module: " modules nil t))))
+    (let ((module (if (= (length modules) 1)
+                      (car modules)
+                    (completing-read "Module: " modules nil t))))
+      (android--log "selected module %s" module)
+      module)))
 
 (defun android--select-variant (module)
   "Prompt user to select a variant for MODULE.  Returns variant name string."
   (let ((variants (android--flavor-variants module)))
-    (if (= (length variants) 1)
-        (car variants)
-      (completing-read (format "Variant (%s): " module) variants nil t))))
+    (let ((variant (if (= (length variants) 1)
+                       (car variants)
+                     (completing-read (format "Variant (%s): " module) variants nil t))))
+      (android--log "selected variant %s for module %s" variant module)
+      variant)))
 
 (defun android--capitalize (s)
   "Capitalize first letter of S."
@@ -427,24 +461,27 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
 (defun android-print-flavor ()
   "Print the project's flavors, variants and application IDs."
   (interactive)
+  (android--log "printing flavor data")
   (let ((flavors (android--get-flavors t)))
     (if flavors
         (dolist (f flavors)
-          (message "Module: %s Variant: %s AppId: %s"
-                   (nth 0 f) (nth 1 f) (nth 2 f)))
-      (message "No application flavors found."))))
+          (android--log "module=%s variant=%s appId=%s"
+                        (nth 0 f) (nth 1 f) (nth 2 f)))
+      (android--log "no application flavors found"))))
 
 (defun android-refresh-flavors ()
   "Force refresh the cached flavor data."
   (interactive)
+  (android--log "refreshing flavor cache")
   (android--get-flavors t)
-  (message "Refreshed: %d flavors" (length android--flavor-cache)))
+  (android--log "refreshed %d flavors" (length android--flavor-cache)))
 
 (defun android-gradle (tasks-or-goals)
   "Run gradle TASKS-OR-GOALS in the project root directory."
   (interactive "sTasks or Goals: ")
   (android-in-directory
    (android-root)
+   (android--log "running Gradle in %s: ./gradlew %s" default-directory tasks-or-goals)
    (compile (format "./gradlew %s" tasks-or-goals))))
 
 (defun android-gradle-build ()
@@ -453,6 +490,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
   (let* ((module (android--select-module))
          (variant (android--select-variant module))
          (task (format ":%s:assemble%s" module (android--capitalize variant))))
+    (android--log "build task %s" task)
     (android-gradle task)))
 
 (defun android-gradle-install ()
@@ -461,6 +499,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
   (let* ((module (android--select-module))
          (variant (android--select-variant module))
          (task (format ":%s:install%s" module (android--capitalize variant))))
+    (android--log "install task %s" task)
     (android-gradle task)))
 
 (defun android-gradle-uninstall ()
@@ -469,6 +508,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
   (let* ((module (android--select-module))
          (variant (android--select-variant module))
          (task (format ":%s:uninstall%s" module (android--capitalize variant))))
+    (android--log "uninstall task %s" task)
     (android-gradle task)))
 
 (defun android-gradle-test ()
@@ -477,11 +517,13 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
   (let* ((module (android--select-module))
          (variant (android--select-variant module))
          (task (format ":%s:test%sUnitTest" module (android--capitalize variant))))
+    (android--log "test task %s" task)
     (android-gradle task)))
 
 (defun android-gradle-clean ()
   "Run clean on the whole project."
   (interactive)
+  (android--log "clean task")
   (android-gradle "clean"))
 
 (defun android--list-devices ()
@@ -504,6 +546,7 @@ Parses output of `adb devices -l'."
   "Prompt user to select a device when multiple are connected.
 Returns the device serial string.  If only one device, return it directly."
   (let ((devices (android--list-devices)))
+    (android--log "found %d connected device(s)" (length devices))
     (cond
      ((null devices) (error "No Android devices connected"))
      ((= (length devices) 1) (caar devices))
@@ -521,7 +564,7 @@ When CALLBACK is non-nil, call it with no arguments on success."
          (buf-name (format "*adb install %s*" (file-name-nondirectory apk)))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf (erase-buffer))
-    (message "Installing %s on %s ..." (file-name-nondirectory apk) device)
+    (android--log "installing %s on %s" (file-name-nondirectory apk) device)
     (make-process
      :name "adb-install"
      :buffer buf
@@ -534,7 +577,7 @@ When CALLBACK is non-nil, call it with no arguments on success."
            (if (and (zerop (process-exit-status proc))
                     (string-match-p "Success" output))
                (progn
-                 (message "Installed %s on %s" (file-name-nondirectory apk) device)
+                 (android--log "installed %s on %s" (file-name-nondirectory apk) device)
                  (kill-buffer (process-buffer proc))
                  (when callback (funcall callback)))
              (pop-to-buffer (process-buffer proc))
@@ -547,7 +590,7 @@ When CALLBACK is non-nil, call it with no arguments on success."
          (buf-name (format "*adb launch %s*" package))
          (buf (get-buffer-create buf-name)))
     (with-current-buffer buf (erase-buffer))
-    (message "Launching %s on %s ..." package device)
+    (android--log "launching %s on %s" package device)
     (make-process
      :name "adb-launch"
      :buffer buf
@@ -562,7 +605,7 @@ When CALLBACK is non-nil, call it with no arguments on success."
            (if (and (zerop (process-exit-status proc))
                     (not (string-match-p "^Error\\|No activities found" output)))
                (progn
-                 (message "Launched %s on %s" package device)
+                 (android--log "launched %s on %s" package device)
                  (kill-buffer (process-buffer proc))
                  (when callback (funcall callback)))
              (pop-to-buffer (process-buffer proc))
@@ -575,7 +618,7 @@ When CALLBACK is non-nil, call it with no arguments on success."
     (let* ((command (format "%s shell monkey -p %s -c android.intent.category.LAUNCHER 1"
                             (android-tool-path "adb") package))
            (output (shell-command-to-string command)))
-      (message "Launching %s" package)
+      (android--log "launching %s" package)
       (when (string-match-p "^Error\\|No activities found" output)
         (error "Error launching app:\n%s" output)))))
 
@@ -594,6 +637,7 @@ Gradle steps chain via `compilation-finish-functions'."
        ((stringp step)
         (android-in-directory
          (android-root)
+         (android--log "running chained Gradle step: ./gradlew %s" step)
          (compile (format "./gradlew %s" step)))
         (when rest
           (let (hook)
@@ -601,6 +645,7 @@ Gradle steps chain via `compilation-finish-functions'."
                   (lambda (_buf status)
                     (remove-hook 'compilation-finish-functions hook)
                     (when (string-match-p "finished" status)
+                      (android--log "chained Gradle step finished: %s" status)
                       (android--compilation-chain rest))))
             (add-hook 'compilation-finish-functions hook))))
        ;; function with 1 arg → async step, pass continuation
@@ -626,6 +671,8 @@ When only one device is connected, it is used automatically."
          (assemble-task (format ":%s:assemble%s" module cap-variant))
          (package (android--flavor-appid module variant)))
     (unless package (error "No applicationId for %s:%s" module variant))
+    (android--log "run module=%s variant=%s device=%s package=%s task=%s"
+                  module variant device package assemble-task)
     (android--compilation-chain
      (list assemble-task
            (lambda (next)
