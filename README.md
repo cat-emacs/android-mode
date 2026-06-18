@@ -50,9 +50,9 @@ From a local checkout:
 `ANDROID_HOME` and a project `local.properties` `sdk.dir` value take precedence
 over `android-mode-sdk-dir`.
 
-Gradle commands run in visible buffers. Flavor discovery writes its synchronous
-Gradle output to `*android-gradle-log*`; build, install, uninstall, test, clean,
-and run tasks use Emacs compilation buffers.
+Gradle command output is retained in buffers. Flavor discovery writes its
+synchronous Gradle output to `*android-gradle-log*`; build, install, uninstall,
+test, clean, and run tasks use Emacs compilation buffers.
 
 ## Development
 

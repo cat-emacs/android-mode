@@ -350,7 +350,7 @@ Returns the data list, or nil if no valid cache exists."
               (plist-get plist :data))))))))
 
 (defun android--run-gradle-for-output (root command)
-  "Run Gradle COMMAND in ROOT visibly and return its output."
+  "Run Gradle COMMAND in ROOT, write logs, and return its output."
   (android-in-directory
    root
    (let ((buffer (get-buffer-create android-mode-gradle-log-buffer-name)))
@@ -360,7 +360,6 @@ Returns the data list, or nil if no valid cache exists."
          (erase-buffer)
          (insert (format "$ %s\n\n" command)))
        (setq-local default-directory root)
-       (display-buffer buffer)
        (let ((exit-code (call-process-shell-command command nil buffer t)))
          (android--log "Gradle command exited with code %s" exit-code)
          (buffer-string))))))
