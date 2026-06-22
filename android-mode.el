@@ -314,10 +314,13 @@ Uses aapt2 to find the launchable activity from the built APK."
   :type 'string
   :group 'android)
 
+(defconst android--flavor-cache-version 2
+  "Flavor cache schema version.")
+
 (defvar android--flavor-cache nil
   "Cached flavor data as plist entries.
 Each entry contains :module-path, :module-name, :module-root, :variant,
-:application-id, and :source-roots.
+:application-id, :source-roots, and :preview-task.
 Per-project, keyed by project root.")
 
 (defvar android--flavor-cache-root nil
@@ -334,8 +337,24 @@ Per-project, keyed by project root.")
     (android--log "saving flavor cache for %s to %s" root file)
     (make-directory (file-name-directory file) t)
     (with-temp-file file
-      (prin1 (list :root root :time (current-time) :data data)
+      (prin1 (list :version android--flavor-cache-version
+                   :root root
+                   :time (current-time)
+                   :data data)
              (current-buffer)))))
+
+(defun android--flavor-cache-valid-p (data)
+  "Return non-nil when DATA matches the current flavor cache schema."
+  (and (listp data)
+       (seq-every-p
+        (lambda (entry)
+          (and (keywordp (car-safe entry))
+               (plist-get entry :module-path)
+               (plist-get entry :module-root)
+               (plist-get entry :variant)
+               (plist-member entry :source-roots)
+               (plist-member entry :preview-task)))
+        data)))
 
 (defun android--flavor-cache-load (root)
   "Load cached flavor data for project ROOT from disk.
@@ -347,7 +366,11 @@ Returns the data list, or nil if no valid cache exists."
         (with-temp-buffer
           (insert-file-contents file)
           (let ((plist (read (current-buffer))))
-            (when (string= (plist-get plist :root) root)
+            (when (and (= (or (plist-get plist :version) 0)
+                          android--flavor-cache-version)
+                       (string= (plist-get plist :root) root)
+                       (android--flavor-cache-valid-p
+                        (plist-get plist :data)))
               (plist-get plist :data))))))))
 
 (defun android--run-gradle-for-output (root command)
@@ -407,7 +430,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
        ((string-match-p "===FLAVORS_END===" line)
         (setq in-flavors nil))
        (in-flavors
-        (pcase-let ((`(,module-path ,module-root ,variant ,appid ,source-roots)
+        (pcase-let ((`(,module-path ,module-root ,variant ,appid ,source-roots ,preview-task)
                      (split-string line "|" nil)))
           (when (and module-path module-root variant)
             (push (list :module-path module-path
@@ -415,7 +438,8 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
                         :module-root module-root
                         :variant variant
                         :application-id (or appid "")
-                        :source-roots (split-string (or source-roots "") ";" t))
+                        :source-roots (split-string (or source-roots "") ";" t)
+                        :preview-task (or preview-task ""))
                   result))))))
     (nreverse result)))
 

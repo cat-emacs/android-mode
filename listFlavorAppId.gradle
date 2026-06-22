@@ -5,11 +5,12 @@
 // selected variant comes from Android Components variant metadata. KMP source
 // roots come from Kotlin Gradle Plugin targets/compilations/source sets.
 
-def flavorLines = []
+def flavorRecords = []
 def androidPluginIds = [
     'com.android.application',
     'com.android.library',
-    'com.android.dynamic-feature'
+    'com.android.dynamic-feature',
+    'com.android.kotlin.multiplatform.library'
 ]
 
 def addRelativeDir = { proj, roots, dir ->
@@ -72,6 +73,19 @@ def sourceRoots = { proj, variantName ->
     roots.join(";")
 }
 
+def capitalizeName = { String value ->
+    value ? value.substring(0, 1).toUpperCase() + value.substring(1) : value
+}
+
+def previewTaskName = { proj, variantName ->
+    def capitalized = capitalizeName(variantName)
+    [
+        "test${capitalized}UnitTest",
+        "assemble${capitalized}",
+        "compile${capitalized}"
+    ].find { taskName -> proj.tasks.findByName(taskName) != null } ?: "test${capitalized}UnitTest"
+}
+
 allprojects { proj ->
     androidPluginIds.each { pluginId ->
         proj.plugins.withId(pluginId) {
@@ -79,7 +93,11 @@ allprojects { proj ->
             if (androidComponents != null) {
                 androidComponents.onVariants(androidComponents.selector().all()) { variant ->
                     def applicationId = variant.hasProperty("applicationId") ? variant.applicationId.get() : ""
-                    flavorLines.add("${proj.path}|${proj.projectDir.absolutePath}|${variant.name}|${applicationId}|${sourceRoots(proj, variant.name)}")
+                    flavorRecords.add([
+                        project: proj,
+                        variantName: variant.name,
+                        applicationId: applicationId
+                    ])
                 }
             }
         }
@@ -88,6 +106,10 @@ allprojects { proj ->
 
 gradle.projectsEvaluated {
     println "===FLAVORS_START==="
-    flavorLines.each { println it }
+    flavorRecords.each { record ->
+        def proj = record.project
+        def variantName = record.variantName
+        println "${proj.path}|${proj.projectDir.absolutePath}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName)}"
+    }
     println "===FLAVORS_END==="
 }
