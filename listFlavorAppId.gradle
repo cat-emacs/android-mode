@@ -1,13 +1,86 @@
 // Init script compatible with AGP 9 / Gradle 9 / includeBuild.
+//
+// Mirrors Android Studio's module/variant source for preview/run flows:
+// Gradle project path comes from the Gradle-backed module identity, and the
+// selected variant comes from Android Components variant metadata. KMP source
+// roots come from Kotlin Gradle Plugin targets/compilations/source sets.
 
 def flavorLines = []
+def androidPluginIds = [
+    'com.android.application',
+    'com.android.library',
+    'com.android.dynamic-feature'
+]
+
+def addRelativeDir = { proj, roots, dir ->
+    if (dir != null && dir.isDirectory()) {
+        roots.add(proj.projectDir.toPath().relativize(dir.toPath()).toString())
+    }
+}
+
+def addSourceDirectorySet = { proj, roots, sourceDirectorySet ->
+    sourceDirectorySet?.srcDirs?.each { dir ->
+        addRelativeDir(proj, roots, dir)
+    }
+}
+
+def addAndroidSourceRoots = { proj, roots ->
+    def android = proj.extensions.findByName("android")
+    android?.sourceSets?.each { sourceSet ->
+        addSourceDirectorySet(proj, roots, sourceSet?.java)
+        if (sourceSet?.hasProperty("kotlin")) {
+            addSourceDirectorySet(proj, roots, sourceSet.kotlin)
+        }
+    }
+}
+
+def addKotlinMultiplatformAndroidSourceRoots = { proj, roots, variantName ->
+    def kotlin = proj.extensions.findByName("kotlin")
+    if (kotlin == null || !kotlin.hasProperty("targets")) {
+        return
+    }
+    kotlin?.targets?.matching { target ->
+        def platformType = target.hasProperty("platformType") ? target.platformType?.name : null
+        platformType == "androidJvm" || platformType == "android"
+    }?.each { target ->
+        target.compilations?.matching { compilation ->
+            compilation.name == variantName ||
+                compilation.name == "${variantName}UnitTest" ||
+                compilation.name.equalsIgnoreCase("main") ||
+                compilation.name.equalsIgnoreCase("test")
+        }?.each { compilation ->
+            compilation.allKotlinSourceSets?.each { sourceSet ->
+                addSourceDirectorySet(proj, roots, sourceSet.kotlin)
+                sourceSet.resources?.srcDirs?.each { dir ->
+                    addRelativeDir(proj, roots, dir)
+                }
+            }
+            compilation.defaultSourceSet?.with { sourceSet ->
+                addSourceDirectorySet(proj, roots, sourceSet.kotlin)
+                sourceSet.resources?.srcDirs?.each { dir ->
+                    addRelativeDir(proj, roots, dir)
+                }
+            }
+        }
+    }
+}
+
+def sourceRoots = { proj, variantName ->
+    def roots = new LinkedHashSet<String>()
+    addAndroidSourceRoots(proj, roots)
+    addKotlinMultiplatformAndroidSourceRoots(proj, roots, variantName)
+    roots.join(";")
+}
 
 allprojects { proj ->
-    proj.plugins.withId('com.android.application') {
-        def androidComponents = proj.extensions.findByName("androidComponents")
-        if (androidComponents != null) {
-            androidComponents.onVariants(androidComponents.selector().all()) { variant ->
-                flavorLines.add("${proj.name}:${variant.name}=${variant.applicationId.get()}")
+    androidPluginIds.each { pluginId ->
+        proj.plugins.withId(pluginId) {
+            def androidComponents = proj.extensions.findByName("androidComponents")
+            if (androidComponents != null) {
+                androidComponents.onVariants(androidComponents.selector().all()) { variant ->
+                    def applicationId = variant.hasProperty("applicationId") ? variant.applicationId.get() : ""
+                    flavorLines.add("${proj.path}|${proj.projectDir.absolutePath}|${variant.name}|${applicationId}|${sourceRoots(proj, variant.name)}")
+                }
             }
         }
     }

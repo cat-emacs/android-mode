@@ -112,7 +112,7 @@ It prioritizes in the following order:
                       (and (file-directory-p sdk-dir) sdk-dir))))))))
    (getenv "ANDROID_HOME")
    android-mode-sdk-dir
-   (error "No SDK directory found. Set `android-mode-sdk-dir` or ANDROID_HOME.")))
+   (error "No SDK directory found.  Set `android-mode-sdk-dir` or ANDROID_HOME")))
 
 (defun android-tool-path (name)
   "Find the full path to an SDK tool NAME.
@@ -189,8 +189,7 @@ Returns nil instead of signaling on non-zero exit (e.g. no matches)."
         (split-string (buffer-string) "\n" t)))))
 
 (defun android--find-module-dir (dir)
-  "Recursively return a list of subdirectories of DIR that contain
-a `build.gradle' or `build.gradle.kts' file.
+  "Return subdirectories of DIR that contain a Gradle build file.
 Uses `fd' for speed when available, falls back to Elisp traversal."
   (when-let ((dir (file-name-as-directory (expand-file-name dir))))
     (if (executable-find "fd")
@@ -316,7 +315,9 @@ Uses aapt2 to find the launchable activity from the built APK."
   :group 'android)
 
 (defvar android--flavor-cache nil
-  "Cached flavor data as list of (MODULE VARIANT APPID).
+  "Cached flavor data as plist entries.
+Each entry contains :module-path, :module-name, :module-root, :variant,
+:application-id, and :source-roots.
 Per-project, keyed by project root.")
 
 (defvar android--flavor-cache-root nil
@@ -395,7 +396,7 @@ With REFRESH non-nil, re-fetch from gradle."
     android--flavor-cache))
 
 (defun android-parse-gradle-flavors (gradle-output)
-  "Parse GRADLE-OUTPUT and return a list of (MODULE VARIANT APPID) tuples.
+  "Parse GRADLE-OUTPUT and return Android module metadata plists.
 Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
   (let ((in-flavors nil)
         (result '()))
@@ -406,34 +407,98 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
        ((string-match-p "===FLAVORS_END===" line)
         (setq in-flavors nil))
        (in-flavors
-        (when (string-match "^\\([^:]+\\):\\([^=]+\\)=\\(.+\\)$" line)
-          (let ((module (match-string 1 line))
-                (variant (match-string 2 line))
-                (appid (match-string 3 line)))
-            (push (list module variant appid) result))))))
+        (pcase-let ((`(,module-path ,module-root ,variant ,appid ,source-roots)
+                     (split-string line "|" nil)))
+          (when (and module-path module-root variant)
+            (push (list :module-path module-path
+                        :module-name (string-remove-prefix ":" module-path)
+                        :module-root module-root
+                        :variant variant
+                        :application-id (or appid "")
+                        :source-roots (split-string (or source-roots "") ";" t))
+                  result))))))
     (nreverse result)))
+
+(defun android--flavor-field (entry index property)
+  "Return ENTRY field from plist PROPERTY or legacy tuple INDEX."
+  (if (keywordp (car-safe entry))
+      (plist-get entry property)
+    (nth index entry)))
 
 (defun android--flavor-modules ()
   "Return deduplicated list of module names from flavor data."
-  (delete-dups (mapcar #'car (android--get-flavors))))
+  (delete-dups
+   (mapcar (lambda (entry)
+             (android--flavor-field entry 0 :module-name))
+           (android--get-flavors))))
 
 (defun android--flavor-variants (module)
   "Return list of variant names for MODULE."
-  (mapcar #'cadr
-          (seq-filter (lambda (f) (string= (car f) module))
+  (mapcar (lambda (entry)
+            (android--flavor-field entry 1 :variant))
+          (seq-filter (lambda (entry)
+                        (string= (android--flavor-field entry 0 :module-name)
+                                 module))
                       (android--get-flavors))))
 
 (defun android--flavor-appid (module variant)
   "Return applicationId for MODULE and VARIANT."
-  (nth 2 (seq-find (lambda (f)
-                     (and (string= (car f) module)
-                          (string= (cadr f) variant)))
-                   (android--get-flavors))))
+  (android--flavor-field
+   (seq-find (lambda (entry)
+               (and (string= (android--flavor-field entry 0 :module-name)
+                             module)
+                    (string= (android--flavor-field entry 1 :variant)
+                             variant)))
+             (android--get-flavors))
+   2
+   :application-id))
+
+(defun android--file-in-directory-p (file directory)
+  "Return non-nil when FILE is inside DIRECTORY."
+  (let ((file (file-truename file))
+        (directory (file-name-as-directory (file-truename directory))))
+    (string-prefix-p directory file)))
+
+(defun android--target-source-root-score (file module-root source-root)
+  "Return match score when FILE is under SOURCE-ROOT in MODULE-ROOT."
+  (let ((root (expand-file-name source-root
+                                (file-name-as-directory module-root))))
+    (when (android--file-in-directory-p file root)
+      (length (file-truename root)))))
+
+(defun android--target-score (file entry)
+  "Return source-root match score for FILE and module metadata ENTRY."
+  (let ((module-root (plist-get entry :module-root)))
+    (when (and module-root (android--file-in-directory-p file module-root))
+      (or (seq-max
+           (delq nil
+                 (mapcar (lambda (source-root)
+                           (android--target-source-root-score
+                            file module-root source-root))
+                         (plist-get entry :source-roots))))
+          (length (file-truename module-root))))))
+
+(defun android--target-for-source-file (file project-root &optional entries)
+  "Return best Android module metadata for FILE under PROJECT-ROOT.
+ENTRIES defaults to `android--get-flavors'."
+  (let* ((file (expand-file-name file))
+         (entries (or entries
+                      (let ((default-directory project-root))
+                        (android--get-flavors))))
+         best-entry
+         best-score)
+    (dolist (entry entries)
+      (when (keywordp (car-safe entry))
+        (let ((score (android--target-score file entry)))
+          (when (and score (or (not best-score) (> score best-score)))
+            (setq best-entry entry
+                  best-score score)))))
+    best-entry))
 
 ;; --- Interactive selection ---
 
 (defun android--select-module ()
-  "Prompt user to select a module.  Returns module name string."
+  "Prompt user to select a module and return the module name string."
   (let ((modules (android--flavor-modules)))
     (let ((module (if (= (length modules) 1)
                       (car modules)
@@ -442,7 +507,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
       module)))
 
 (defun android--select-variant (module)
-  "Prompt user to select a variant for MODULE.  Returns variant name string."
+  "Prompt user to select a variant for MODULE and return its name."
   (let ((variants (android--flavor-variants module)))
     (let ((variant (if (= (length variants) 1)
                        (car variants)
@@ -622,7 +687,8 @@ When CALLBACK is non-nil, call it with no arguments on success."
         (error "Error launching app:\n%s" output)))))
 
 (defun android--compilation-chain (steps)
-  "Run STEPS sequentially.  Each step is one of:
+  "Run build chain items sequentially.
+STEPS is a list where each item is one of:
 - a string: gradle command, run via `compile'.
 - a function taking one arg (a continuation thunk): async step,
   must call the thunk when done to proceed to the next step.
@@ -683,6 +749,7 @@ When only one device is connected, it is used automatically."
 
 ;; Gradle (keep simple macro for custom tasks)
 (defmacro android-defun-gradle-task (task)
+  "Define an interactive Android Gradle command for TASK."
   `(defun ,(intern (concat "android-gradle-"
                            (replace-regexp-in-string "[[:space:]:]" "-" task)))
        ()
