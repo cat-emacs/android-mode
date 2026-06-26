@@ -78,6 +78,7 @@
       (should (string-match-p "androidComponents" script))
       (should (string-match-p "extensions.findByName(\"kotlin\")" script))
       (should (string-match-p "compilations" script))
+      (should (string-match-p "desktopTest" script))
       (should-not (string-match-p "src/commonMain/kotlin" script))
       (should-not (string-match-p "src/androidMain/kotlin" script)))))
 

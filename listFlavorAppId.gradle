@@ -77,7 +77,10 @@ def capitalizeName = { String value ->
     value ? value.substring(0, 1).toUpperCase() + value.substring(1) : value
 }
 
-def previewTaskName = { proj, variantName ->
+def previewTaskName = { proj, variantName, pluginId ->
+    if (pluginId == 'com.android.kotlin.multiplatform.library') {
+        return proj.tasks.findByName("desktopTest") != null ? "desktopTest" : "assemble${capitalizeName(variantName)}"
+    }
     def capitalized = capitalizeName(variantName)
     [
         "test${capitalized}UnitTest",
@@ -95,6 +98,7 @@ allprojects { proj ->
                     def applicationId = variant.hasProperty("applicationId") ? variant.applicationId.get() : ""
                     flavorRecords.add([
                         project: proj,
+                        pluginId: pluginId,
                         variantName: variant.name,
                         applicationId: applicationId
                     ])
@@ -109,7 +113,7 @@ gradle.projectsEvaluated {
     flavorRecords.each { record ->
         def proj = record.project
         def variantName = record.variantName
-        println "${proj.path}|${proj.projectDir.absolutePath}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName)}"
+        println "${proj.path}|${proj.projectDir.absolutePath}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}"
     }
     println "===FLAVORS_END==="
 }
