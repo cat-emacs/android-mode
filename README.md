@@ -15,7 +15,7 @@ With `use-package` and `package-vc`:
 
 ```elisp
 (use-package android-mode
-  :vc (android-mode :url "https://github.com/chuxubank/emacs-studio"
+  :vc (android-mode :url "https://github.com/cat-emacs/emacs-studio"
                     :lisp-dir "android-mode/")
   :commands #'android-root)
 ```
