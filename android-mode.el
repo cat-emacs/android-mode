@@ -8,7 +8,7 @@
 ;; Keywords: tools processes
 ;; Version: 0.7.0
 ;; Package-Requires: ((emacs "28.1"))
-;; URL: https://github.com/cat-emacs/emacs-studio
+;; URL: https://github.com/cat-emacs/android-mode
 
 ;; This program is free software; you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License
