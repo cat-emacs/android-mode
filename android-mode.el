@@ -74,6 +74,10 @@ available."
 (defvar android-mode-gradle-log-buffer-name "*android-gradle-log*"
   "Buffer name used for synchronous android-mode Gradle output.")
 
+(defvar android--selected-targets nil
+  "Alist of selected Android targets keyed by project root.
+Each value is a cons cell of (MODULE . VARIANT).")
+
 (defun android--log (format-string &rest args)
   "Log android-mode message FORMAT-STRING with ARGS."
   (apply #'message (concat "android-mode: " format-string) args))
@@ -267,13 +271,15 @@ Parses the built APK via aapt2."
           (push (match-string 1) activities)))
       (nreverse activities))))
 
-(defun android-start-app ()
+(defun android-start-app (&optional prompt)
   "Start an application on the connected device.
-Interactively select module and variant, then launch via adb.
+Use the current project selection, or select module and variant.
+With prefix argument PROMPT, select module and variant again.
 Uses aapt2 to find the launchable activity from the built APK."
-  (interactive)
-  (let* ((module (android--select-module))
-         (variant (android--select-variant module))
+  (interactive "P")
+  (let* ((target (android--select-target prompt))
+         (module (car target))
+         (variant (cdr target))
          (package (android--flavor-appid module variant))
          (apk (android--apk-path)))
     (unless package (error "No applicationId for %s:%s" module variant))
@@ -539,6 +545,21 @@ ENTRIES defaults to `android--get-flavors'."
       (android--log "selected variant %s for module %s" variant module)
       variant)))
 
+(defun android--select-target (&optional prompt)
+  "Return selected (MODULE . VARIANT) for the current project.
+Reuse the current project selection unless PROMPT is non-nil."
+  (let* ((root (android-root))
+         (current (and root (assoc root android--selected-targets))))
+    (if (and current (not prompt))
+        (cdr current)
+      (let* ((module (android--select-module))
+             (variant (android--select-variant module))
+             (target (cons module variant)))
+        (when root
+          (setf (alist-get root android--selected-targets nil nil #'string=)
+                target))
+        target))))
+
 (defun android--capitalize (s)
   "Capitalize first letter of S."
   (if (string-empty-p s) s
@@ -572,38 +593,46 @@ ENTRIES defaults to `android--get-flavors'."
    (android--log "running Gradle in %s: ./gradlew %s" default-directory tasks-or-goals)
    (compile (format "./gradlew %s" tasks-or-goals))))
 
-(defun android-gradle-build ()
-  "Interactively select module and variant, then run assemble task."
-  (interactive)
-  (let* ((module (android--select-module))
-         (variant (android--select-variant module))
+(defun android-gradle-build (&optional prompt)
+  "Run assemble task for the current project selection.
+With prefix argument PROMPT, select module and variant again."
+  (interactive "P")
+  (let* ((target (android--select-target prompt))
+         (module (car target))
+         (variant (cdr target))
          (task (format ":%s:assemble%s" module (android--capitalize variant))))
     (android--log "build task %s" task)
     (android-gradle task)))
 
-(defun android-gradle-install ()
-  "Interactively select module and variant, then run install task."
-  (interactive)
-  (let* ((module (android--select-module))
-         (variant (android--select-variant module))
+(defun android-gradle-install (&optional prompt)
+  "Run install task for the current project selection.
+With prefix argument PROMPT, select module and variant again."
+  (interactive "P")
+  (let* ((target (android--select-target prompt))
+         (module (car target))
+         (variant (cdr target))
          (task (format ":%s:install%s" module (android--capitalize variant))))
     (android--log "install task %s" task)
     (android-gradle task)))
 
-(defun android-gradle-uninstall ()
-  "Interactively select module and variant, then run uninstall task."
-  (interactive)
-  (let* ((module (android--select-module))
-         (variant (android--select-variant module))
+(defun android-gradle-uninstall (&optional prompt)
+  "Run uninstall task for the current project selection.
+With prefix argument PROMPT, select module and variant again."
+  (interactive "P")
+  (let* ((target (android--select-target prompt))
+         (module (car target))
+         (variant (cdr target))
          (task (format ":%s:uninstall%s" module (android--capitalize variant))))
     (android--log "uninstall task %s" task)
     (android-gradle task)))
 
-(defun android-gradle-test ()
-  "Interactively select module and variant, then run test task."
-  (interactive)
-  (let* ((module (android--select-module))
-         (variant (android--select-variant module))
+(defun android-gradle-test (&optional prompt)
+  "Run test task for the current project selection.
+With prefix argument PROMPT, select module and variant again."
+  (interactive "P")
+  (let* ((target (android--select-target prompt))
+         (module (car target))
+         (variant (cdr target))
          (task (format ":%s:test%sUnitTest" module (android--capitalize variant))))
     (android--log "test task %s" task)
     (android-gradle task)))
@@ -746,15 +775,17 @@ Gradle steps chain via `compilation-finish-functions'."
         (funcall step)
         (android--compilation-chain rest))))))
 
-(defun android-run ()
+(defun android-run (&optional prompt)
   "Build, install and launch the app.
-Interactively select module, variant and target device, then chain:
+Use the current project selection, select target device, then chain:
   gradle assemble → adb install → adb start.
 All adb steps run asynchronously without blocking Emacs.
-When only one device is connected, it is used automatically."
-  (interactive)
-  (let* ((module (android--select-module))
-         (variant (android--select-variant module))
+When only one device is connected, it is used automatically.
+With prefix argument PROMPT, select module and variant again."
+  (interactive "P")
+  (let* ((target (android--select-target prompt))
+         (module (car target))
+         (variant (cdr target))
          (device (android--select-device))
          (cap-variant (android--capitalize variant))
          (assemble-task (format ":%s:assemble%s" module cap-variant))
