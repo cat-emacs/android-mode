@@ -320,7 +320,7 @@ Uses aapt2 to find the launchable activity from the built APK."
   :type 'string
   :group 'android)
 
-(defconst android--flavor-cache-version 2
+(defconst android--flavor-cache-version 3
   "Flavor cache schema version.")
 
 (defvar android--flavor-cache nil

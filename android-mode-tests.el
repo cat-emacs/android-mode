@@ -52,6 +52,22 @@
              (current-buffer)))
     (should-not (android--flavor-cache-load root))))
 
+(ert-deftest android-mode-flavor-cache-rejects-stale-preview-task-schema ()
+  "Flavor caches created before JVM preview discovery are ignored."
+  (let* ((root "/tmp/project/")
+         (android-mode-cache-dir (make-temp-file "android-mode-cache" t))
+         (file (android--flavor-cache-file root))
+         (entry (list :module-path ":composeApp"
+                      :module-root "/tmp/project/composeApp"
+                      :variant "androidMain"
+                      :source-roots '("src/commonMain/kotlin")
+                      :preview-task "assembleAndroidMain")))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file
+      (prin1 (list :version 2 :root root :time (current-time) :data (list entry))
+             (current-buffer)))
+    (should-not (android--flavor-cache-load root))))
+
 (ert-deftest android-mode-target-for-source-file-prefers-kmp-source-set ()
   "Target lookup maps KMP source-set files to their owning Gradle module."
   (let* ((project-root "/tmp/project/")
@@ -78,6 +94,7 @@
       (should (string-match-p "androidComponents" script))
       (should (string-match-p "extensions.findByName(\"kotlin\")" script))
       (should (string-match-p "compilations" script))
+      (should (string-match-p "platformType == \"jvm\"" script))
       (should (string-match-p "desktopTest" script))
       (should-not (string-match-p "src/commonMain/kotlin" script))
       (should-not (string-match-p "src/androidMain/kotlin" script)))))
