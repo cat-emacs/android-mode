@@ -83,6 +83,7 @@ Each value is a cons cell of (MODULE . VARIANT).")
   "Log android-mode message FORMAT-STRING with ARGS."
   (apply #'message (concat "android-mode: " format-string) args))
 
+;;;###autoload
 (defun android-root ()
   "Find the root directory of the Android project.
 The root is the directory containing the project's `gradlew` file."
