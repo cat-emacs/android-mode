@@ -37,16 +37,23 @@ From a local checkout:
 - `M-x android-run`
 - `M-x android-start-app`
 - `M-x android-avd-start`
+- `M-x android-avd-install-system-image`
 - `M-x android-avd`
 - `M-x android-print-flavor`
 - `M-x android-refresh-flavors`
 
 `android-avd` opens a Transient menu with actions for listing, creating,
-deleting, starting, stopping, and wiping data for Android Virtual Devices.
-Creating an AVD uses installed system images discovered by `sdkmanager` and
-device profiles discovered by `avdmanager`. The Android command-line tools
-can be installed under either `cmdline-tools/latest/bin` or a versioned
-`cmdline-tools/<version>/bin` directory.
+deleting, starting, stopping, and wiping data for Android Virtual Devices. It
+can also download system images that are not installed. The create command
+lists both installed and downloadable images; selecting a downloadable image
+installs it asynchronously before creating the AVD. Installation output is
+shown in `*android-system-image-install*`.
+
+System image management prefers the current `android sdk` command and falls
+back to `sdkmanager`. Device profiles are discovered with `avdmanager`. The
+Android command-line tools can be installed under either
+`cmdline-tools/latest/bin` or a versioned `cmdline-tools/<version>/bin`
+directory.
 
 AVD support lives in `android-mode-avd.el` and is loaded on demand, while
 `android-mode.el` remains focused on project, Gradle, application, and device

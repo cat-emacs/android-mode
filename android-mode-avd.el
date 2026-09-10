@@ -21,7 +21,7 @@
 
 ;;; Code:
 
-(require 'cl-lib)
+(require 'comint)
 (require 'seq)
 (require 'subr-x)
 (require 'transient)
@@ -30,12 +30,15 @@
 (defvar android-avd--exclusive-processes nil
   "Symbols identifying emulator processes started by android-mode.")
 
+(defun android-avd--run-command (program &rest args)
+  "Run PROGRAM with ARGS and return its exit status and output."
+  (with-temp-buffer
+    (let ((status (apply #'call-process program nil (current-buffer) nil args)))
+      (cons status (buffer-string)))))
+
 (defun android-avd--run-tool (name &rest args)
   "Run SDK tool NAME with ARGS and return its exit status and output."
-  (with-temp-buffer
-    (let ((status (apply #'call-process (android-tool-path name)
-                         nil (current-buffer) nil args)))
-      (cons status (buffer-string)))))
+  (apply #'android-avd--run-command (android-tool-path name) args))
 
 (defun android-avd--run-tool-with-input (input name &rest args)
   "Run SDK tool NAME with ARGS, sending it INPUT on standard input."
@@ -69,24 +72,44 @@
         (push process-symbol android-avd--exclusive-processes)
         process))))
 
-(defun android-avd--parse-system-images (output)
-  "Return installed system image package names parsed from SDK OUTPUT."
+(defun android-avd--normalize-system-image-package (package)
+  "Return canonical semicolon-separated name for system image PACKAGE."
+  (if (string-prefix-p "system-images/" package)
+      (string-replace "/" ";" package)
+    package))
+
+(defun android-avd--android-cli-system-image-package (package)
+  "Return slash-separated Android CLI name for system image PACKAGE."
+  (string-replace ";" "/" package))
+
+(defun android-avd--parse-system-image-inventory (output)
+  "Return installed and available system images parsed from SDK OUTPUT."
   (let ((case-fold-search t)
-        (in-installed nil)
-        result)
+        section
+        installed
+        available)
     (dolist (line (split-string output "\n" t))
       (cond
        ((string-match-p "^[[:space:]]*installed packages:" line)
-        (setq in-installed t))
-       ((and in-installed
-             (string-match-p "^[[:space:]]*available packages:" line))
-        (setq in-installed nil))
-       ((and in-installed
+        (setq section 'installed))
+       ((string-match-p "^[[:space:]]*available packages:" line)
+        (setq section 'available))
+       ((string-match-p "^[[:space:]]*available updates:" line)
+        (setq section nil))
+       ((and section
              (string-match
-              "^[[:space:]]*\\(system-images;[^|[:space:]]+\\)[[:space:]]*|"
+              "^[[:space:]]*\\(system-images\\(?:;\\|/\\)[^|[:space:]]+\\)"
               line))
-        (push (match-string 1 line) result))))
-    (delete-dups (nreverse result))))
+        (let ((package
+               (android-avd--normalize-system-image-package
+                (match-string 1 line))))
+          (if (eq section 'installed)
+              (push package installed)
+            (push package available))))))
+    (setq installed (delete-dups (nreverse installed))
+          available (delete-dups (nreverse available)))
+    (list :installed installed
+          :available (seq-difference available installed #'string=))))
 
 (defun android-avd--parse-device-profiles (output)
   "Return device profile ids parsed from AVDMANAGER OUTPUT."
@@ -105,12 +128,23 @@
               (match-string 1 line))))
           (split-string output "\n" t)))))
 
-(defun android-avd--installed-system-images ()
-  "Return installed Android system image package names."
-  (let* ((result (android-avd--run-tool "sdkmanager" "--list"))
+(defun android-avd--system-image-list-result ()
+  "Return the result of listing installed and available system images."
+  (let ((android-cli (ignore-errors (android-tool-path "android"))))
+    (or (and android-cli
+             (let ((result
+                    (android-avd--run-command
+                     android-cli "sdk" "list" "--all" "system-images*")))
+               (and (zerop (car result)) result)))
+        (android-avd--run-tool "sdkmanager" "--list"))))
+
+(defun android-avd--system-image-inventory ()
+  "Return a plist of installed and available Android system images."
+  (let* ((result (android-avd--system-image-list-result))
          (status (car result)))
-    (when (zerop status)
-      (android-avd--parse-system-images (cdr result)))))
+    (unless (zerop status)
+      (error "Unable to list Android system images:\n%s" (cdr result)))
+    (android-avd--parse-system-image-inventory (cdr result))))
 
 (defun android-avd--device-profiles ()
   "Return Android device profile ids known to AVDMANAGER."
@@ -162,6 +196,112 @@
       (special-mode))
     (pop-to-buffer buffer)))
 
+(defun android-avd--system-image-candidates (inventory)
+  "Return completion candidates for system image INVENTORY."
+  (append
+   (mapcar (lambda (package)
+             (cons (format "[installed] %s" package)
+                   (cons package t)))
+           (plist-get inventory :installed))
+   (mapcar (lambda (package)
+             (cons (format "[download]  %s" package)
+                   (cons package nil)))
+           (plist-get inventory :available))))
+
+(defun android-avd--read-system-image ()
+  "Prompt for a system image and return (PACKAGE . INSTALLED-P)."
+  (let* ((inventory (android-avd--system-image-inventory))
+         (candidates (android-avd--system-image-candidates inventory)))
+    (unless candidates
+      (error "No Android system images are available"))
+    (cdr (assoc (completing-read "System image: "
+                                 (mapcar #'car candidates) nil t)
+                candidates))))
+
+(defun android-avd--sdk-install-command (package)
+  "Return a command list that installs system image PACKAGE."
+  (if-let* ((android-cli (ignore-errors (android-tool-path "android"))))
+      (list android-cli "sdk" "install"
+            (android-avd--android-cli-system-image-package package))
+    (list (android-tool-path "sdkmanager") package)))
+
+(defun android-avd--start-system-image-install (package callback)
+  "Install system image PACKAGE asynchronously, then call CALLBACK."
+  (let* ((command (android-avd--sdk-install-command package))
+         (buffer (get-buffer-create "*android-system-image-install*"))
+         (process-name
+          (format "android-system-image-%s" (substring (md5 package) 0 8))))
+    (when-let* ((existing (get-buffer-process buffer)))
+      (user-error "A system image installation is already running"))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "$ " (mapconcat #'shell-quote-argument command " ") "\n\n"))
+      (comint-mode))
+    (apply #'make-comint-in-buffer
+           process-name buffer (car command) nil (cdr command))
+    (let ((process (get-buffer-process buffer)))
+      (set-process-query-on-exit-flag process nil)
+      (set-process-sentinel
+       process
+       (lambda (proc _event)
+         (when (memq (process-status proc) '(exit signal))
+           (if (zerop (process-exit-status proc))
+               (progn
+                 (message "Installed Android system image %s" package)
+                 (when callback
+                   (funcall callback)))
+             (pop-to-buffer (process-buffer proc))
+             (message "Failed to install Android system image %s"
+                      package)))))
+      (display-buffer buffer)
+      process)))
+
+(defun android-avd--confirm-system-image-install (package callback)
+  "Confirm installation of system image PACKAGE, then call CALLBACK."
+  (when (yes-or-no-p (format "Download system image %s? " package))
+    (android-avd--start-system-image-install package callback)))
+
+(defun android-avd-install-system-image (&optional package callback)
+  "Download and install system image PACKAGE, then call CALLBACK.
+Interactively, prompt for an image that is not installed."
+  (interactive)
+  (let* ((inventory (android-avd--system-image-inventory))
+         (installed (plist-get inventory :installed))
+         (available (plist-get inventory :available))
+         (package
+          (or package
+              (and available
+                   (completing-read "Download system image: "
+                                    available nil t)))))
+    (unless package
+      (user-error "No downloadable Android system images found"))
+    (if (member package installed)
+        (progn
+          (message "Android system image is already installed: %s" package)
+          (when callback
+            (funcall callback)))
+      (unless (member package available)
+        (user-error "Android system image is not available: %s" package))
+      (android-avd--confirm-system-image-install package callback))))
+
+(defun android-avd--create-device (name package device)
+  "Create AVD NAME using system image PACKAGE and hardware DEVICE."
+  (let* ((args (append '("create" "avd" "--name")
+                       (list name "--package" package "--force")
+                       (and (not (string-empty-p device))
+                            (list "--device" device))))
+         (result
+          (apply #'android-avd--run-tool-with-input
+                 "no\n" "avdmanager" args))
+         (status (car result))
+         (output (cdr result)))
+    (if (zerop status)
+        (progn
+          (android--log "created Android Virtual Device %s" name)
+          (message "%s" (string-trim output)))
+      (error "Unable to create AVD %s:\n%s" name output))))
+
 ;;;###autoload
 (defun android-avd-start ()
   "Launch an Android emulator."
@@ -186,33 +326,24 @@
       (error "Unable to list Android Virtual Devices:\n%s" (cdr result)))))
 
 (defun android-avd-create ()
-  "Create an Android Virtual Device using an installed system image."
+  "Create an Android Virtual Device, downloading its system image if needed."
   (interactive)
   (let ((name (read-string "New AVD name: ")))
     (when (string-empty-p name)
       (user-error "AVD name cannot be empty"))
-    (let* ((images (android-avd--installed-system-images))
-           (package (if images
-                        (completing-read "System image: " images nil t)
-                      (read-string "System image package: ")))
+    (let* ((image (android-avd--read-system-image))
+           (package (car image))
+           (installed (cdr image))
            (devices (android-avd--device-profiles))
            (device (and devices
                         (completing-read "Device profile (optional): "
-                                         devices nil nil)))
-           (args (append '("create" "avd" "--name")
-                         (list name "--package" package "--force")
-                         (and (not (string-empty-p device))
-                              (list "--device" device))))
-           (result
-            (apply #'android-avd--run-tool-with-input
-                   "no\n" "avdmanager" args))
-           (status (car result))
-           (output (cdr result)))
-      (if (zerop status)
-          (progn
-            (android--log "created Android Virtual Device %s" name)
-            (message "%s" (string-trim output)))
-        (error "Unable to create AVD %s:\n%s" name output)))))
+                                         devices nil nil))))
+      (if installed
+          (android-avd--create-device name package device)
+        (android-avd--confirm-system-image-install
+         package
+         (lambda ()
+           (android-avd--create-device name package device)))))))
 
 (defun android-avd-delete ()
   "Delete an Android Virtual Device."
@@ -255,6 +386,7 @@
   ["AVD"
    ("l" "List AVDs" android-avd-list)
    ("c" "Create AVD" android-avd-create)
+   ("i" "Install system image" android-avd-install-system-image)
    ("d" "Delete AVD" android-avd-delete)
    ("w" "Wipe data and start" android-avd-wipe-data)]
   ["Emulator"

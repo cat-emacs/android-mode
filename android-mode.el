@@ -788,6 +788,8 @@ With prefix argument PROMPT, select module and variant again."
 
 (autoload 'android-avd-start "android-mode-avd"
   "Launch an Android emulator." t)
+(autoload 'android-avd-install-system-image "android-mode-avd"
+  "Download and install an Android system image." t)
 (autoload 'android-avd "android-mode-avd"
   "Create and manage Android Virtual Devices." t)
 (define-obsolete-function-alias
