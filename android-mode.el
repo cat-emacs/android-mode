@@ -169,7 +169,7 @@ Returns nil instead of signaling on non-zero exit (e.g. no matches)."
 (defun android--find-module-dir (dir)
   "Return subdirectories of DIR that contain a Gradle build file.
 Uses `fd' for speed when available, falls back to Elisp traversal."
-  (when-let ((dir (file-name-as-directory (expand-file-name dir))))
+  (when-let* ((dir (file-name-as-directory (expand-file-name dir))))
     (if (executable-find "fd")
         (delq nil
               (mapcar (lambda (line)
@@ -227,7 +227,7 @@ Uses `fd' when available, falls back to scanning module build directories."
 (defun android-project-package ()
   "Return the package name of the Android project.
 Parses the built APK via aapt2."
-  (when-let ((apk (android--apk-path)))
+  (when-let* ((apk (android--apk-path)))
     (let ((output (android--aapt2-dump apk)))
       (when (string-match "^package: name='\\([^']+\\)'" output)
         (match-string 1 output)))))
@@ -235,7 +235,7 @@ Parses the built APK via aapt2."
 (defun android-project-main-activities (&optional _category)
   "Return list of main activity class names.
 Parses the built APK via aapt2."
-  (when-let ((apk (android--apk-path)))
+  (when-let* ((apk (android--apk-path)))
     (let ((output (android--aapt2-dump apk))
           activities)
       (with-temp-buffer
@@ -792,12 +792,17 @@ With prefix argument PROMPT, select module and variant again."
   "Download and install an Android system image." t)
 (autoload 'android-avd "android-mode-avd"
   "Create and manage Android Virtual Devices." t)
+(autoload 'android-scrcpy-start "android-mode-scrcpy"
+  "Start scrcpy with the current transient arguments." t)
+(autoload 'android-scrcpy "android-mode-scrcpy"
+  "Configure, start, and manage scrcpy." t)
 (define-obsolete-function-alias
   'android-start-emulator #'android-avd-start "0.8.0")
 
 (defconst android-mode-keys
   '(("a" . android-start-app)
     ("r" . android-run)
+    ("s" . android-scrcpy)
     ("e" . android-avd-start)
     ("f" . android-print-flavor)
     ("R" . android-refresh-flavors)
@@ -832,7 +837,7 @@ With prefix argument PROMPT, select module and variant again."
     (when versions
       (concat "build-tools/" (car (last (sort versions #'string<)))))))
 
-(when-let ((subdir (ignore-errors (android--latest-build-tools-subdir))))
+(when-let* ((subdir (ignore-errors (android--latest-build-tools-subdir))))
   (cl-pushnew subdir android-mode-sdk-tool-subdirs :test #'string=))
 
 (provide 'android-mode)

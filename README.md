@@ -8,6 +8,7 @@ Android project helpers for Emacs.
 - building, installing, uninstalling, testing, and running Android apps
 - launching an emulator
 - creating and managing Android Virtual Devices with a Transient menu
+- mirroring and controlling Android devices with a scrcpy Transient menu
 - starting the currently built application on a connected device
 
 ## Installation
@@ -39,6 +40,8 @@ From a local checkout:
 - `M-x android-avd-start`
 - `M-x android-avd-install-system-image`
 - `M-x android-avd`
+- `M-x android-scrcpy`
+- `M-x android-scrcpy-start`
 - `M-x android-print-flavor`
 - `M-x android-refresh-flavors`
 
@@ -58,6 +61,22 @@ directory.
 AVD support lives in `android-mode-avd.el` and is loaded on demand, while
 `android-mode.el` remains focused on project, Gradle, application, and device
 workflows.
+
+`android-scrcpy` opens a Transient menu for selecting a device and configuring
+video, window, control, input, audio, and recording options. Press `RET` to
+start scrcpy. The same menu can stop or restart sessions, show their process
+output, copy the generated shell command, and inspect displays, encoders, and
+cameras.
+
+scrcpy is resolved from `exec-path` by default. To use a specific executable or
+pass options that are not exposed in the menu:
+
+```elisp
+(setq android-scrcpy-program "/path/to/scrcpy"
+      android-scrcpy-extra-arguments '("--verbosity=debug"))
+```
+
+Multiple sessions may run concurrently when they target different devices.
 
 ## Configuration
 

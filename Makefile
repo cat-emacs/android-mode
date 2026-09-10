@@ -28,20 +28,24 @@ lint:
 	  android-mode.el
 	$(BATCH) $(LOAD_PATH) \
 	  --eval "(checkdoc-file \"android-mode.el\")" \
-	  --eval "(checkdoc-file \"android-mode-avd.el\")"
+	  --eval "(checkdoc-file \"android-mode-avd.el\")" \
+	  --eval "(checkdoc-file \"android-mode-scrcpy.el\")"
 
 build:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
 	  --eval "(setq byte-compile-error-on-warn t)" \
 	  --eval "(byte-compile-file \"android-mode.el\")" \
-	  --eval "(byte-compile-file \"android-mode-avd.el\")"
+	  --eval "(byte-compile-file \"android-mode-avd.el\")" \
+	  --eval "(byte-compile-file \"android-mode-scrcpy.el\")"
 
 test:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
 	  -l android-mode.el \
 	  -l android-mode-avd.el \
+	  -l android-mode-scrcpy.el \
 	  -l android-mode-tests.el \
 	  -l android-mode-avd-tests.el \
+	  -l android-mode-scrcpy-tests.el \
 	  --eval "(ert-run-tests-batch-and-exit)"
 
 clean:
