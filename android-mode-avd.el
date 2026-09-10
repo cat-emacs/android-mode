@@ -163,7 +163,7 @@
     (pop-to-buffer buffer)))
 
 ;;;###autoload
-(defun android-start-emulator ()
+(defun android-avd-start ()
   "Launch an Android emulator."
   (interactive)
   (let ((avd (or (and (not (string-blank-p android-mode-avd))
@@ -258,7 +258,7 @@
    ("d" "Delete AVD" android-avd-delete)
    ("w" "Wipe data and start" android-avd-wipe-data)]
   ["Emulator"
-   ("s" "Start emulator" android-start-emulator)
+   ("s" "Start emulator" android-avd-start)
    ("k" "Stop emulator" android-avd-stop)])
 
 (provide 'android-mode-avd)

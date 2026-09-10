@@ -786,15 +786,17 @@ With prefix argument PROMPT, select module and variant again."
      (interactive)
      (android-gradle ,task)))
 
-(autoload 'android-start-emulator "android-mode-avd"
+(autoload 'android-avd-start "android-mode-avd"
   "Launch an Android emulator." t)
 (autoload 'android-avd "android-mode-avd"
   "Create and manage Android Virtual Devices." t)
+(define-obsolete-function-alias
+  'android-start-emulator #'android-avd-start "0.8.0")
 
 (defconst android-mode-keys
   '(("a" . android-start-app)
     ("r" . android-run)
-    ("e" . android-start-emulator)
+    ("e" . android-avd-start)
     ("f" . android-print-flavor)
     ("R" . android-refresh-flavors)
     ("C" . android-gradle-clean)

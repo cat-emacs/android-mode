@@ -36,7 +36,7 @@ From a local checkout:
 - `M-x android-gradle-test`
 - `M-x android-run`
 - `M-x android-start-app`
-- `M-x android-start-emulator`
+- `M-x android-avd-start`
 - `M-x android-avd`
 - `M-x android-print-flavor`
 - `M-x android-refresh-flavors`
