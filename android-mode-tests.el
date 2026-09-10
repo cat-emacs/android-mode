@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Unit tests for pure helpers.
+;; Unit tests for helpers and command argument construction.
 
 ;;; Code:
 
@@ -28,6 +28,54 @@
        :application-id "com.example.feature"
        :source-roots ("src/main/kotlin")
        :preview-task "assembleRelease")))))
+
+(ert-deftest android-mode-parse-avd-command-output ()
+  "AVD helper parsers extract system images and device profile ids."
+  (should
+   (equal
+    (android--parse-system-images
+     "Installed packages:\n\
+system-images;android-35;google_apis;x86_64 | 2 | Google APIs Intel x86_64 Atom System Image\n\
+system-images;android-35;google_apis;x86_64 | 2 | duplicate\n\
+Available Packages:\n\
+system-images;android-36;google_apis;x86_64 | 1 | not installed\n")
+    '("system-images;android-35;google_apis;x86_64")))
+  (should
+   (equal
+    (android--parse-device-profiles
+     "id: \"pixel_9\"\n\
+    Name: Pixel 9\n\
+id: \"pixel_9_pro\"\n")
+    '("pixel_9" "pixel_9_pro"))))
+
+(ert-deftest android-mode-avd-create-uses-selected-image-and-device ()
+  "AVD creation builds an avdmanager command from the selected inputs."
+  (let (input tool args
+        (choices '("system-images;android-35;google_apis;x86_64" "pixel_9")))
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (_prompt) "Pixel 9"))
+              ((symbol-function 'android--installed-system-images)
+               (lambda () '("system-images;android-35;google_apis;x86_64")))
+              ((symbol-function 'android--device-profiles)
+               (lambda () '("pixel_9")))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt _collection &rest _args) (pop choices)))
+              ((symbol-function 'android--run-tool-with-input)
+               (lambda (received-input received-tool &rest received-args)
+                 (setq input received-input
+                       tool received-tool
+                       args received-args)
+                 (cons 0 "Created AVD")))
+              ((symbol-function 'android--log) #'ignore)
+              ((symbol-function 'message) #'ignore))
+      (android-avd-create)
+      (should (equal input "no\n"))
+      (should (equal tool "avdmanager"))
+      (should
+       (equal args
+              '("create" "avd" "--name" "Pixel 9"
+                "--package" "system-images;android-35;google_apis;x86_64"
+                "--force" "--device" "pixel_9"))))))
 
 (ert-deftest android-mode-flavor-helpers-use-cache ()
   "Flavor helper functions read module, variant and applicationId from cache."

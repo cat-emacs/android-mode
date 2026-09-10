@@ -7,6 +7,7 @@ Android project helpers for Emacs.
 - selecting Gradle modules and variants from project flavor data
 - building, installing, uninstalling, testing, and running Android apps
 - launching an emulator
+- creating and managing Android Virtual Devices with a Transient menu
 - starting the currently built application on a connected device
 
 ## Installation
@@ -36,8 +37,16 @@ From a local checkout:
 - `M-x android-run`
 - `M-x android-start-app`
 - `M-x android-start-emulator`
+- `M-x android-avd`
 - `M-x android-print-flavor`
 - `M-x android-refresh-flavors`
+
+`android-avd` opens a Transient menu with actions for listing, creating,
+deleting, starting, stopping, and wiping data for Android Virtual Devices.
+Creating an AVD uses installed system images discovered by `sdkmanager` and
+device profiles discovered by `avdmanager`. The Android command-line tools
+can be installed under either `cmdline-tools/latest/bin` or a versioned
+`cmdline-tools/<version>/bin` directory.
 
 ## Configuration
 
