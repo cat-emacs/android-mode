@@ -38,7 +38,6 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(require 'transient)
 
 (defgroup android nil
   "A minor mode for Android application development."
@@ -143,214 +142,6 @@ Searches in `android-mode-sdk-tool-subdirs` for the executable."
                      #'file-directory-p
                      (directory-files cmdline-tools t "^[^.]" t))))))
     (delete-dups (append android-mode-sdk-tool-subdirs versioned))))
-
-(defun android--run-tool (name &rest args)
-  "Run SDK tool NAME with ARGS and return a cons of exit status and output."
-  (with-temp-buffer
-    (let ((status (apply #'call-process (android-tool-path name)
-                         nil (current-buffer) nil args)))
-      (cons status (buffer-string)))))
-
-(defun android--run-tool-with-input (input name &rest args)
-  "Run SDK tool NAME with ARGS, sending it INPUT on standard input."
-  (let ((input-file (make-temp-file "android-mode-input")))
-    (unwind-protect
-        (progn
-          (with-temp-file input-file
-            (insert input))
-          (with-temp-buffer
-            (let ((status (apply #'call-process (android-tool-path name)
-                                 input-file (current-buffer) nil args)))
-              (cons status (buffer-string)))))
-      (delete-file input-file))))
-
-(defvar android-exclusive-processes ()
-  "A list of symbols representing running exclusive processes.")
-
-(defun android-start-exclusive-command (name command &rest args)
-  "Run COMMAND named NAME with ARGS unless it's already running."
-  (let ((proc-name (intern name)))
-    (when (not (cl-member proc-name android-exclusive-processes))
-      (let* ((full-command (format "%s %s" command (mapconcat #'shell-quote-argument args " ")))
-             (process (start-process-shell-command name name full-command)))
-        (set-process-sentinel process
-                              (lambda (proc _msg)
-                                (when (memq (process-status proc) '(exit signal))
-                                  (setq android-exclusive-processes
-                                        (cl-remove (intern (process-name proc))
-                                                   android-exclusive-processes)))))
-        (push proc-name android-exclusive-processes)
-        process))))
-
-(defun android-list-avd ()
-  "List of Android Virtual Devices installed on local machine.
-Uses the modern `emulator -list-avds` command."
-  (let* ((result (android--run-tool "emulator" "-list-avds"))
-         (status (car result))
-         (output (cdr result))
-         (result (split-string output "\n" t)))
-    (if (and (zerop status) result)
-        result
-      (error "No Android Virtual Devices found"))))
-
-(defun android-start-emulator ()
-  "Launch Android emulator."
-  (interactive)
-  (let ((avd (or (and (not (string-blank-p android-mode-avd)) android-mode-avd)
-                 (completing-read "Android Virtual Device: " (android-list-avd)))))
-    (android--log "starting emulator %s" avd)
-    (unless (android-start-exclusive-command (format "*android-emulator-%s*" avd)
-                                             (android-tool-path "emulator")
-                                             "-avd"
-                                             avd)
-      (android--log "emulator for %s is already running or being started" avd))))
-
-(defun android--parse-system-images (output)
-  "Return installed system image package names parsed from SDK OUTPUT."
-  (let ((case-fold-search t)
-        (in-installed nil)
-        result)
-    (dolist (line (split-string output "\n" t))
-      (cond
-       ((string-match-p "^[[:space:]]*installed packages:" line)
-        (setq in-installed t))
-       ((and in-installed
-             (string-match-p "^[[:space:]]*available packages:" line))
-        (setq in-installed nil))
-       ((and in-installed
-             (string-match
-              "^[[:space:]]*\\(system-images;[^|[:space:]]+\\)[[:space:]]*|"
-              line))
-        (push (match-string 1 line) result))))
-    (delete-dups (nreverse result))))
-
-(defun android--parse-device-profiles (output)
-  "Return device profile ids parsed from AVDMANAGER OUTPUT."
-  (delete-dups
-   (delq nil
-         (mapcar
-          (lambda (line)
-            (cond
-             ((string-match
-               "^[[:space:]]*id:[[:space:]]*[^[:space:]]+[[:space:]]+or[[:space:]]*\"?\\([^\"]+\\)\"?"
-               line)
-              (match-string 1 line))
-             ((string-match
-               "^[[:space:]]*id:[[:space:]]*\"?\\([^\"[:space:]]+\\)\"?"
-               line)
-              (match-string 1 line))))
-          (split-string output "\n" t)))))
-
-(defun android--installed-system-images ()
-  "Return installed Android system image package names."
-  (let* ((result (android--run-tool "sdkmanager" "--list"))
-         (status (car result)))
-    (when (zerop status)
-      (android--parse-system-images (cdr result)))))
-
-(defun android--device-profiles ()
-  "Return Android device profile ids known to AVDMANAGER."
-  (let* ((result (android--run-tool "avdmanager" "list" "device"))
-         (status (car result)))
-    (when (zerop status)
-      (android--parse-device-profiles (cdr result)))))
-
-(defun android--read-avd-name (&optional prompt)
-  "Prompt for an installed AVD name with optional PROMPT."
-  (let ((avds (android-list-avd)))
-    (completing-read (or prompt "Android Virtual Device: ") avds nil t)))
-
-(defun android--display-avd-output (title output)
-  "Display AVD command OUTPUT in a read-only buffer named TITLE."
-  (let ((buffer (get-buffer-create title)))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert output))
-      (special-mode))
-    (pop-to-buffer buffer)))
-
-(defun android-avd-list ()
-  "List configured Android Virtual Devices in a help buffer."
-  (interactive)
-  (let* ((result (android--run-tool "avdmanager" "list" "avd"))
-         (status (car result)))
-    (if (zerop status)
-        (android--display-avd-output "*android-avds*" (cdr result))
-      (error "Unable to list Android Virtual Devices:\n%s" (cdr result)))))
-
-(defun android-avd-create ()
-  "Create an Android Virtual Device using an installed system image."
-  (interactive)
-  (let* ((name (read-string "New AVD name: ")))
-    (when (string-empty-p name)
-      (user-error "AVD name cannot be empty"))
-    (let* ((images (android--installed-system-images))
-           (package (if images
-                        (completing-read "System image: " images nil t)
-                      (read-string "System image package: ")))
-           (devices (android--device-profiles))
-           (device (and devices
-                        (completing-read "Device profile (optional): "
-                                         devices nil nil)))
-           (args (append '("create" "avd" "--name")
-                         (list name "--package" package "--force")
-                         (and (not (string-empty-p device))
-                              (list "--device" device))))
-           (result (apply #'android--run-tool-with-input "no\n" "avdmanager" args))
-           (status (car result))
-           (output (cdr result)))
-      (if (zerop status)
-          (progn
-            (android--log "created Android Virtual Device %s" name)
-            (message "%s" (string-trim output)))
-        (error "Unable to create AVD %s:\n%s" name output)))))
-
-(defun android-avd-delete ()
-  "Delete an Android Virtual Device."
-  (interactive)
-  (let ((name (android--read-avd-name "Delete Android Virtual Device: ")))
-    (when (yes-or-no-p (format "Delete AVD %s? " name))
-      (let* ((result (android--run-tool "avdmanager" "delete" "avd"
-                                        "--name" name))
-             (status (car result)))
-        (if (zerop status)
-            (message "Deleted AVD %s" name)
-          (error "Unable to delete AVD %s:\n%s" name (cdr result)))))))
-
-(defun android-avd-stop ()
-  "Stop a running Android emulator."
-  (interactive)
-  (let* ((device (android--select-device))
-         (result (android--run-tool "adb" "-s" device "emu" "kill"))
-         (status (car result)))
-    (if (zerop status)
-        (message "Stopped Android emulator %s" device)
-      (error "Unable to stop Android emulator %s:\n%s" device (cdr result)))))
-
-(defun android-avd-wipe-data ()
-  "Start an AVD with its user data wiped."
-  (interactive)
-  (let ((avd (android--read-avd-name "Wipe data and start AVD: ")))
-    (when (yes-or-no-p (format "Wipe all data for AVD %s and start it? " avd))
-      (android--log "wiping data for AVD %s" avd)
-      (unless (android-start-exclusive-command
-               (format "*android-emulator-%s*" avd)
-               (android-tool-path "emulator")
-               "-avd" avd "-wipe-data")
-        (android--log "emulator for %s is already running or being started" avd)))))
-
-;;;###autoload
-(transient-define-prefix android-avd ()
-  "Create and manage Android Virtual Devices."
-  ["AVD"
-   ("l" "List AVDs" android-avd-list)
-   ("c" "Create AVD" android-avd-create)
-   ("d" "Delete AVD" android-avd-delete)
-   ("w" "Wipe data and start" android-avd-wipe-data)]
-  ["Emulator"
-   ("s" "Start emulator" android-start-emulator)
-   ("k" "Stop emulator" android-avd-stop)])
 
 (defun android-current-buffer-class-name ()
   "Try to determine the fully qualified class name defined in the current buffer."
@@ -994,6 +785,11 @@ With prefix argument PROMPT, select module and variant again."
      ,(concat "Run `gradle " task "` in the project root directory.")
      (interactive)
      (android-gradle ,task)))
+
+(autoload 'android-start-emulator "android-mode-avd"
+  "Launch an Android emulator." t)
+(autoload 'android-avd "android-mode-avd"
+  "Create and manage Android Virtual Devices." t)
 
 (defconst android-mode-keys
   '(("a" . android-start-app)

@@ -48,6 +48,10 @@ device profiles discovered by `avdmanager`. The Android command-line tools
 can be installed under either `cmdline-tools/latest/bin` or a versioned
 `cmdline-tools/<version>/bin` directory.
 
+AVD support lives in `android-mode-avd.el` and is loaded on demand, while
+`android-mode.el` remains focused on project, Gradle, application, and device
+workflows.
+
 ## Configuration
 
 ```elisp

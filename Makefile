@@ -27,17 +27,21 @@ lint:
 	  --eval "(package-lint-batch-and-exit)" \
 	  android-mode.el
 	$(BATCH) $(LOAD_PATH) \
-	  --eval "(checkdoc-file \"android-mode.el\")"
+	  --eval "(checkdoc-file \"android-mode.el\")" \
+	  --eval "(checkdoc-file \"android-mode-avd.el\")"
 
 build:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
 	  --eval "(setq byte-compile-error-on-warn t)" \
-	  --eval "(byte-compile-file \"android-mode.el\")"
+	  --eval "(byte-compile-file \"android-mode.el\")" \
+	  --eval "(byte-compile-file \"android-mode-avd.el\")"
 
 test:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
 	  -l android-mode.el \
+	  -l android-mode-avd.el \
 	  -l android-mode-tests.el \
+	  -l android-mode-avd-tests.el \
 	  --eval "(ert-run-tests-batch-and-exit)"
 
 clean:
