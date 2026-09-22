@@ -296,11 +296,18 @@ Uses aapt2 to find the launchable activity from the built APK."
   :type 'string
   :group 'android)
 
-(defconst android--flavor-cache-version 8
+(defconst android--flavor-cache-version 9
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
   "Hook run after an Android project model refresh succeeds.")
+
+(defvar android-project-model-state-changed-hook nil
+  "Hook run after an Android project model state changes.
+Each function receives PROJECT-ROOT and the new status plist.")
+
+(defvar android--project-model-states (make-hash-table :test #'equal)
+  "Project model status plists keyed by normalized project root.")
 
 (defvar android--project-refresh-processes (make-hash-table :test #'equal)
   "Active project model refresh processes keyed by project root.")
@@ -317,8 +324,9 @@ Uses aapt2 to find the launchable activity from the built APK."
 (defvar android--flavor-cache nil
   "Cached flavor data as plist entries.
 Each entry contains :module-id, :build-root, :module-path, :module-name,
-:module-root, :plugin-id, :variant, :namespace, :application-id,
-:test-application-id, :components, :source-roots, :preview-task,
+:module-root, :plugin-id, :project-type, :variant, :namespace,
+:debuggable-p, :application-id, :test-application-id, :components, :source-roots,
+:preview-task,
 :build-type, :product-flavors, :preferred-build-type-p, and
 :preferred-product-flavors.  Per-project, keyed by project root.")
 
@@ -346,23 +354,98 @@ Each entry contains :module-id, :build-root, :module-path, :module-name,
 (defvar android--project-watch-timer nil
   "Idle timer used when native file notifications are unavailable.")
 
+(defun android--set-project-model-state (root state &optional diagnostic)
+  "Set ROOT model STATE and optional DIAGNOSTIC, then notify listeners."
+  (let* ((root (android--project-root root))
+         (old (gethash root android--project-model-states))
+         (status (list :state state
+                       :diagnostic diagnostic
+                       :last-model-available-p
+                       (and android--flavor-cache
+                            (equal root android--flavor-cache-root))
+                       :changed-at (current-time))))
+    (unless (and (eq state (plist-get old :state))
+                 (equal diagnostic (plist-get old :diagnostic))
+                 (eq (plist-get status :last-model-available-p)
+                     (plist-get old :last-model-available-p)))
+      (puthash root status android--project-model-states)
+      (run-hook-with-args
+       'android-project-model-state-changed-hook root status))
+    status))
+
+(defun android-project-model-status (&optional project-root)
+  "Return structured project model status for PROJECT-ROOT.
+The :state value is one of `not-loaded', `needs-sync', `syncing', `ready', or
+`failed'.  :diagnostic contains the latest refresh failure, and
+:last-model-available-p reports whether stale target metadata remains usable."
+  (when-let* ((root (android--project-root project-root)))
+    (or (gethash root android--project-model-states)
+        (list :state
+              (cond
+               ((gethash root android--project-refresh-processes) 'syncing)
+               ((and android--flavor-cache
+                     (equal root android--flavor-cache-root))
+                (if android--flavor-cache-stale-p 'needs-sync 'ready))
+               (t 'not-loaded))
+              :diagnostic nil
+              :last-model-available-p
+              (and android--flavor-cache
+                   (equal root android--flavor-cache-root))))))
+
 (defun android--selection-file (root)
   "Return the target selection file path for project ROOT."
   (let ((key (md5 (directory-file-name (expand-file-name root)))))
     (expand-file-name (concat key "-selection.eld") android-mode-cache-dir)))
 
+(defconst android--project-input-file-regexp
+  "\\.\\(?:gradle\\(?:\\.kts\\)?\\|groovy\\|java\\|kt\\|properties\\|toml\\)\\'"
+  "File suffixes that can affect the Android project model.")
+
+(defun android--directory-input-files (directory)
+  "Return relevant model input files below DIRECTORY."
+  (when (file-directory-p directory)
+    (let (result)
+      (dolist (entry
+               (directory-files directory t directory-files-no-dot-files-regexp))
+        (cond
+         ((and (file-directory-p entry)
+               (not (member (file-name-nondirectory entry)
+                            '(".git" ".gradle" "build"))))
+          (setq result (nconc result (android--directory-input-files entry))))
+         ((string-match-p android--project-input-file-regexp entry)
+          (push entry result))))
+      result)))
+
 (defun android--file-signature (file)
   "Return a lightweight metadata signature for FILE."
   (if (file-directory-p file)
       (mapcar (lambda (entry)
-                (cons (file-name-nondirectory entry)
+                (cons (file-relative-name entry file)
                       (android--file-signature entry)))
-              (directory-files file t "\\.toml\\'" t))
+              (sort (android--directory-input-files file) #'string<))
     (when-let* ((attributes (file-attributes file 'string)))
       (list (file-attribute-type attributes)
             (file-attribute-size attributes)
             (file-attribute-modification-time attributes)
             (file-attribute-status-change-time attributes)))))
+
+(defun android--included-build-roots (build-root)
+  "Return literal included-build directories declared below BUILD-ROOT."
+  (let (result)
+    (dolist (name '("settings.gradle" "settings.gradle.kts"))
+      (let ((file (expand-file-name name build-root)))
+        (when (file-readable-p file)
+          (with-temp-buffer
+            (insert-file-contents file)
+            (goto-char (point-min))
+            (while (re-search-forward
+                    "includeBuild[[:space:]]*(?[[:space:]]*['\"]\\([^'\"]+\\)['\"]"
+                    nil t)
+              (push (file-name-as-directory
+                     (expand-file-name (match-string-no-properties 1)
+                                       build-root))
+                    result))))))
+    (delete-dups result)))
 
 (defun android--project-model-input-files (root &optional data)
   "Return model input files for ROOT and cached model DATA."
@@ -375,12 +458,17 @@ Each entry contains :module-id, :build-root, :module-path, :module-name,
           (delete-dups (delq nil (mapcar (lambda (entry)
                                            (plist-get entry :module-root))
                                          data))))
+         (included-build-roots
+          (delete-dups
+           (cl-loop for dir in build-roots
+                    append (android--included-build-roots dir))))
          files)
     (dolist (dir (append build-roots module-roots))
       (dolist (name '("build.gradle" "build.gradle.kts" "gradle.properties"
                       "settings.gradle" "settings.gradle.kts"))
         (push (expand-file-name name dir) files)))
     (dolist (dir build-roots)
+      (push (expand-file-name "buildSrc" dir) files)
       (push (expand-file-name "gradle/wrapper/gradle-wrapper.properties" dir)
             files)
       (let ((catalog-dir (expand-file-name "gradle" dir)))
@@ -388,6 +476,7 @@ Each entry contains :module-id, :build-root, :module-path, :module-name,
         (when (file-directory-p catalog-dir)
           (setq files (nconc (directory-files catalog-dir t "\\.toml\\'" t)
                              files)))))
+    (setq files (nconc included-build-roots files))
     (sort (delete-dups files) #'string<)))
 
 (defun android--project-model-fingerprint (root &optional data inputs)
@@ -445,7 +534,11 @@ When INPUTS is non-nil, use that exact path list."
                (plist-get entry :module-path)
                (plist-get entry :module-root)
                (plist-get entry :plugin-id)
+               (plist-member entry :project-type)
                (plist-get entry :variant)
+               (plist-member entry :namespace)
+               (plist-member entry :debuggable-p)
+               (plist-member entry :components)
                (plist-member entry :source-roots)
                (plist-member entry :preview-task)
                (plist-member entry :build-type)
@@ -524,20 +617,21 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
          :module (cdr (assoc root android--selected-modules))
          :variants (cdr (assoc root android--selected-variants)))))
 
+(defun android--file-under-input-p (file input)
+  "Return non-nil when FILE is INPUT or lies below directory INPUT."
+  (or (equal file input)
+      (and (file-directory-p input)
+           (file-in-directory-p file input))))
+
 (defun android--project-watch-event-relevant-p (root event)
   "Return non-nil when file notification EVENT affects model ROOT."
   (let ((inputs (gethash root android--project-watch-inputs)))
     (seq-some
      (lambda (file)
        (and file
-            (or (member file inputs)
-                (and (string-suffix-p ".toml" file)
-                     (seq-some
-                      (lambda (input)
-                        (and (file-directory-p input)
-                             (string= (file-name-directory file)
-                                      (file-name-as-directory input))))
-                      inputs)))))
+            (seq-some (lambda (input)
+                        (android--file-under-input-p file input))
+                      inputs)))
      (cddr event))))
 
 (defun android--mark-project-model-stale (root)
@@ -546,6 +640,7 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
     (puthash root t android--project-refresh-invalidated))
   (when (equal root android--flavor-cache-root)
     (setq android--flavor-cache-stale-p t))
+  (android--set-project-model-state root 'needs-sync)
   (android-refresh-project-model root))
 
 (defun android--project-watch-callback (event)
@@ -571,7 +666,10 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
   (when buffer-file-name
     (maphash
      (lambda (root inputs)
-       (when (member buffer-file-name inputs)
+       (when (seq-some
+              (lambda (input)
+                (android--file-under-input-p buffer-file-name input))
+              inputs)
          (android--mark-project-model-stale root)))
      android--project-watch-inputs)))
 
@@ -619,11 +717,14 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
   (let ((callbacks (prog1 (gethash root android--project-refresh-callbacks)
                      (remhash root android--project-refresh-callbacks))))
     (remhash root android--project-refresh-processes)
-    (when data
-      (setq android--flavor-cache data
-            android--flavor-cache-root root)
-      (android--flavor-cache-save root data)
-      (run-hook-with-args 'android-project-model-updated-hook root data))
+    (if data
+        (progn
+          (setq android--flavor-cache data
+                android--flavor-cache-root root)
+          (android--flavor-cache-save root data)
+          (android--set-project-model-state root 'ready)
+          (run-hook-with-args 'android-project-model-updated-hook root data))
+      (android--set-project-model-state root 'failed error-data))
     (dolist (callback callbacks)
       (funcall callback data error-data))))
 
@@ -638,6 +739,7 @@ Return a plist with :data and :fresh-p, or nil for an invalid cache."
   (remhash root android--project-refresh-processes)
   (puthash root callbacks android--project-refresh-callbacks)
   (android--log "project inputs changed during refresh; restarting %s" root)
+  (android--set-project-model-state root 'needs-sync)
   (android-refresh-project-model root))
 
 (defun android--project-refresh-sentinel (process event)
@@ -709,6 +811,7 @@ requests for the same root share one Gradle process."
           (process-put process 'android-project-input-fingerprint fingerprint)
           (remhash root android--project-refresh-invalidated)
           (puthash root process android--project-refresh-processes)
+          (android--set-project-model-state root 'syncing)
           (set-process-sentinel process #'android--project-refresh-sentinel)
           (android--log "refreshing project model for %s asynchronously" root)
           process))))
@@ -734,6 +837,8 @@ Gradle and keeps returning an available last-known in-memory model."
                        android--flavor-cache-stale-p
                        (not (plist-get cache :fresh-p)))
                  (android--watch-project-inputs root (plist-get cache :inputs))
+                 (android--set-project-model-state
+                  root (if android--flavor-cache-stale-p 'needs-sync 'ready))
                  (when android--flavor-cache-stale-p
                    (android-refresh-project-model root))
                  t)))
@@ -775,7 +880,8 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
                          ,source-roots ,preview-task ,build-type
                          ,product-flavors ,preferred-build-type
                          ,preferred-product-flavors ,plugin-id
-                         ,test-application-id ,namespace ,components)
+                         ,test-application-id ,namespace ,components
+                         ,project-type ,debuggable)
                        (split-string line "|" nil)))
           (when (and module-path module-root variant)
             (push (list :module-id (cons build-root module-path)
@@ -784,8 +890,10 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
                         :module-name (string-remove-prefix ":" module-path)
                         :module-root module-root
                         :plugin-id (or plugin-id "")
+                        :project-type (or project-type "")
                         :variant variant
                         :namespace (or namespace "")
+                        :debuggable-p (equal debuggable "true")
                         :application-id (or appid "")
                         :test-application-id (or test-application-id "")
                         :components (android--parse-components components)

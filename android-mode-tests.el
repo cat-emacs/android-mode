@@ -19,7 +19,11 @@
                 :module-name module
                 :module-root root
                 :plugin-id "com.android.application"
+                :project-type "application"
                 :variant variant
+                :namespace (format "com.example.%s" module)
+                :debuggable-p (equal variant "debug")
+                :components nil
                 :application-id (format "com.example.%s" module)
                 :test-application-id ""
                 :source-roots '("src/main/kotlin")
@@ -37,15 +41,17 @@
   (should
    (equal
     (android-parse-gradle-flavors
-     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin;src/androidTest/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application|com.example.test|com.example.namespace|bWFpbg==:ZGVtb0RlYnVn:c3JjL21haW4va290bGluO3NyYy9kZW1vL2tvdGxpbg==,YW5kcm9pZFRlc3Q=:ZGVtb0RlYnVnQW5kcm9pZFRlc3Q=:c3JjL2FuZHJvaWRUZXN0L2tvdGxpbg==\n===FLAVORS_END===\nignored\n")
+     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin;src/androidTest/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application|com.example.test|com.example.namespace|bWFpbg==:ZGVtb0RlYnVn:c3JjL21haW4va290bGluO3NyYy9kZW1vL2tvdGxpbg==,YW5kcm9pZFRlc3Q=:ZGVtb0RlYnVnQW5kcm9pZFRlc3Q=:c3JjL2FuZHJvaWRUZXN0L2tvdGxpbg==|application|true\n===FLAVORS_END===\nignored\n")
     '((:module-id ("/tmp/project" . ":app")
        :build-root "/tmp/project"
        :module-path ":app"
        :module-name "app"
        :module-root "/tmp/project/app"
        :plugin-id "com.android.application"
+       :project-type "application"
        :variant "demoDebug"
        :namespace "com.example.namespace"
+       :debuggable-p t
        :application-id "com.example"
        :test-application-id "com.example.test"
        :components ((:kind "main" :name "demoDebug"
@@ -530,6 +536,55 @@
                        "com.example.app.release" "com.example.feature"
                        "com.example.feature.test" "com.example.library.test"
                        "com.example.standalone.test"))))))
+
+(ert-deftest android-mode-project-model-inputs-include-build-logic ()
+  "Project model fingerprints include buildSrc and convention logic."
+  (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
+         (build-src (expand-file-name "buildSrc/src/main/kotlin/Plugin.kt" root))
+         (build-logic
+          (expand-file-name "build-logic/src/main/kotlin/ConventionPlugin.kt" root))
+         (catalog (expand-file-name "gradle/libs.versions.toml" root))
+         (settings (expand-file-name "settings.gradle.kts" root)))
+    (make-directory (file-name-directory build-src) t)
+    (make-directory (file-name-directory build-logic) t)
+    (make-directory (file-name-directory catalog) t)
+    (with-temp-file build-src (insert "class Plugin\n"))
+    (with-temp-file build-logic (insert "class ConventionPlugin\n"))
+    (with-temp-file catalog (insert "[versions]\n"))
+    (with-temp-file settings (insert "includeBuild(\"build-logic\")\n"))
+    (let ((inputs (android--project-model-input-files root))
+          (logic-root (file-name-as-directory
+                       (expand-file-name "build-logic" root))))
+      (should (member (expand-file-name "buildSrc" root) inputs))
+      (should (member (expand-file-name "gradle" root) inputs))
+      (should (member logic-root inputs))
+      (should (android--file-under-input-p build-src
+                                           (expand-file-name "buildSrc" root)))
+      (should (android--file-under-input-p build-logic logic-root))
+      (let ((before (android--project-model-fingerprint root nil inputs)))
+        (with-temp-file build-logic (insert "class ChangedConventionPlugin\n"))
+        (should-not (equal before
+                           (android--project-model-fingerprint
+                            root nil inputs)))))))
+
+(ert-deftest android-mode-project-model-status-tracks-lifecycle ()
+  "Project model status preserves diagnostics and stale model availability."
+  (let* ((root "/tmp/project/")
+         (android--project-model-states (make-hash-table :test #'equal))
+         (android--flavor-cache (list (android-mode-tests--target "app" "debug")))
+         (android--flavor-cache-root root)
+         events
+         (android-project-model-state-changed-hook
+          (list (lambda (_root status) (push status events)))))
+    (android--set-project-model-state root 'syncing)
+    (android--set-project-model-state root 'failed "Gradle failed")
+    (let ((status (android-project-model-status root)))
+      (should (eq (plist-get status :state) 'failed))
+      (should (equal (plist-get status :diagnostic) "Gradle failed"))
+      (should (plist-get status :last-model-available-p)))
+    (android--set-project-model-state root 'ready)
+    (should (eq (plist-get (android-project-model-status root) :state) 'ready))
+    (should (= (length events) 3))))
 
 (ert-deftest android-mode-project-refresh-is-asynchronous-and-shared ()
   "Concurrent model refresh requests share a process and notify all callers."

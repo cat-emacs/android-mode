@@ -94,22 +94,28 @@ Multiple sessions may run concurrently when they target different devices.
 - `android-project-application-ids` mirrors Android Studio's project set by
   returning distinct main IDs for application, dynamic-feature, and standalone
   test modules together with instrumentation test IDs from every variant;
+- `android-project-model-status` reports `not-loaded`, `needs-sync`, `syncing`,
+  `ready`, or `failed`, including the latest diagnostic and whether a last-known
+  model remains available;
 - `android-refresh-project-model` refreshes metadata asynchronously and invokes
   an optional completion callback.
 
 Project-model reads never wait for Gradle. A missing or stale cache starts one
 shared background refresh per project; callers continue to receive the
-last-known in-memory model when one exists. Successful refreshes run
+last-known in-memory model when one exists. State changes run
+`android-project-model-state-changed-hook`; successful refreshes also run
 `android-project-model-updated-hook`. Disk caches are invalidated when tracked
-settings, Gradle build files, wrapper properties, or version catalogs change.
+settings, Gradle build files, wrapper properties, version catalogs, or buildSrc
+and convention-build source files change.
 
 Target metadata includes a composite-build-safe `:module-id`, `:build-root`,
-Gradle module path, module root, plugin ID, variant, namespace, main and
-instrumentation-test application IDs, variant-specific source components and
-source roots, preview task, build type, product flavors, and `:selected-p`. Source
-components distinguish main, Android device-test, unit-test, and screenshot-test
-ownership. Their static Java/Kotlin directories come from AGP's public Variant
-API; task-produced generated directories are not forced during Gradle
+Gradle module path, module root, plugin ID, project type, variant, namespace,
+debuggable state, main and instrumentation-test application IDs,
+variant-specific source components and source roots, preview task, build type,
+product flavors, and `:selected-p`. Source components distinguish main, Android
+device-test, unit-test, screenshot-test, and test-fixtures ownership. Their
+static Java/Kotlin directories come from AGP's public Variant API; task-produced
+generated directories are not forced during Gradle
 configuration. The default selected
 variant follows Android Studio's ordering: DSL-default build types and flavors,
 then `debug`, then flavor and build-type names. User-selected modules and

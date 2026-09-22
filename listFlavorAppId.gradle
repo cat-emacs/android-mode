@@ -70,6 +70,7 @@ def canonicalComponentKind = { value ->
         case "androidtest": return "androidTest"
         case "unittest": return "unitTest"
         case "screenshottest": return "screenshotTest"
+        case "testfixtures": return "testFixtures"
         default: return value?.toString() ?: "test"
     }
 }
@@ -93,6 +94,10 @@ def componentRecords = { variant ->
     } else if (variant.hasProperty("unitTest") && variant.unitTest != null) {
         components.add([kind: "unitTest", name: variant.unitTest.name,
                         component: variant.unitTest])
+    }
+    if (variant.hasProperty("testFixtures") && variant.testFixtures != null) {
+        components.add([kind: "testFixtures", name: variant.testFixtures.name,
+                        component: variant.testFixtures])
     }
     components
 }
@@ -168,11 +173,16 @@ allprojects { proj ->
                         project: proj,
                         buildRoot: buildRoot,
                         pluginId: pluginId,
+                        projectType: pluginId.startsWith("com.android.")
+                            ? pluginId.substring("com.android.".length())
+                                .replace("kotlin.multiplatform.library", "kmp-library")
+                            : pluginId,
                         variantName: variant.name,
                         variant: variant,
                         applicationId: applicationId,
                         namespaceProvider: variant.hasProperty("namespace") ? variant.namespace : null,
                         testApplicationIdProvider: testApplicationIdProvider,
+                        debuggable: variant.hasProperty("debuggable") ? variant.debuggable : false,
                         buildType: buildType,
                         productFlavors: productFlavors,
                         preferredBuildType: preferredBuildTypeFlag,
@@ -192,7 +202,7 @@ gradle.projectsEvaluated {
         def testApplicationId = record.testApplicationIdProvider?.getOrNull() ?: ""
         def namespace = record.namespaceProvider?.getOrNull() ?: ""
         def components = serializeComponents(proj, record.variant)
-        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${components.roots}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}|${testApplicationId}|${namespace}|${components.serialized}"
+        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${components.roots}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}|${testApplicationId}|${namespace}|${components.serialized}|${record.projectType}|${record.debuggable}"
     }
     println "===FLAVORS_END==="
 }
