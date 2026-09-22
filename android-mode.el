@@ -500,6 +500,43 @@ ENTRIES defaults to `android--get-flavors'."
                   best-score score)))))
     best-entry))
 
+(defun android--root-for-file (file)
+  "Return an Android project root for FILE, or nil."
+  (ignore-errors
+    (let ((default-directory (file-name-directory (expand-file-name file))))
+      (android-root))))
+
+(defun android-project-targets (&optional project-root refresh)
+  "Return Android target metadata for PROJECT-ROOT.
+Each target is a plist containing :module-path, :module-name, :module-root,
+:variant, :application-id, :source-roots, and :preview-task.  PROJECT-ROOT
+defaults to `android-root'.  With REFRESH non-nil, refresh Gradle metadata."
+  (when-let* ((root (or project-root (ignore-errors (android-root)))))
+    (let ((default-directory (file-name-as-directory
+                              (expand-file-name root))))
+      (copy-tree (android--get-flavors refresh)))))
+
+(defun android-project-target (module variant &optional project-root refresh)
+  "Return target for MODULE and VARIANT under PROJECT-ROOT.
+MODULE accepts either a module name or Gradle module path.  With REFRESH
+non-nil, refresh Gradle metadata before resolving the target."
+  (let ((module-name (string-remove-prefix ":" module)))
+    (seq-find
+     (lambda (entry)
+       (and (string= (plist-get entry :module-name) module-name)
+            (string= (plist-get entry :variant) variant)))
+     (android-project-targets project-root refresh))))
+
+(defun android-target-for-source-file (file &optional project-root refresh)
+  "Return the Android target owning FILE under PROJECT-ROOT.
+PROJECT-ROOT defaults to the Android root containing FILE.  With REFRESH
+non-nil, refresh Gradle metadata before resolving the target."
+  (let* ((file (expand-file-name file))
+         (root (or project-root (android--root-for-file file))))
+    (when root
+      (android--target-for-source-file
+       file root (android-project-targets root refresh)))))
+
 ;; --- Interactive selection ---
 
 (defun android--select-module ()
@@ -534,6 +571,64 @@ Reuse the current project selection unless PROMPT is non-nil."
           (setf (alist-get root android--selected-targets nil nil #'string=)
                 target))
         target))))
+
+(defun android-current-target (&optional prompt file project-root)
+  "Return the current Android target metadata.
+When PROMPT is non-nil, prompt for a module and variant and remember that
+selection for PROJECT-ROOT.  Otherwise prefer a remembered selection, then
+the target owning FILE, then the sole available target.  FILE defaults to
+the value of the variable `buffer-file-name', and PROJECT-ROOT defaults to
+`android-root'."
+  (let* ((file (or file buffer-file-name))
+         (root (when-let* ((root
+                            (or project-root
+                                (if file
+                                    (android--root-for-file file)
+                                  (ignore-errors (android-root))))))
+                 (file-name-as-directory (expand-file-name root))))
+         (selected (and root (cdr (assoc root android--selected-targets))))
+         (targets (and root (android-project-targets root)))
+         (selected-target
+          (and selected
+               (seq-find
+                (lambda (entry)
+                  (and (string= (plist-get entry :module-name)
+                                (string-remove-prefix ":" (car selected)))
+                       (string= (plist-get entry :variant) (cdr selected))))
+                targets))))
+    (if prompt
+        (when root
+          (let ((default-directory root))
+            (when-let* ((selection (android--select-target t)))
+              (android-project-target (car selection) (cdr selection) root))))
+      (or selected-target
+          (and root file
+               (android--target-for-source-file file root targets))
+          (and (= (length targets) 1) (car targets))))))
+
+(defun android-current-application-id (&optional prompt file project-root)
+  "Return the current Android application ID, or nil when ambiguous.
+PROMPT, FILE, and PROJECT-ROOT have the same meaning as in
+`android-current-target'."
+  (let* ((file (or file buffer-file-name))
+         (root (or project-root
+                   (if file
+                       (android--root-for-file file)
+                     (ignore-errors (android-root)))))
+         (target (and root (android-current-target prompt file root)))
+         (target-id (plist-get target :application-id))
+         (ids (when (and root
+                         (or (null target-id) (string-empty-p target-id)))
+                (delete-dups
+                 (delq nil
+                       (mapcar
+                        (lambda (entry)
+                          (let ((id (plist-get entry :application-id)))
+                            (and id (not (string-empty-p id)) id)))
+                        (android-project-targets root)))))))
+    (cond
+     ((and target-id (not (string-empty-p target-id))) target-id)
+     ((= (length ids) 1) (car ids)))))
 
 (defun android--capitalize (s)
   "Capitalize first letter of S."

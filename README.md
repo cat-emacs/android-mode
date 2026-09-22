@@ -78,6 +78,18 @@ pass options that are not exposed in the menu:
 
 Multiple sessions may run concurrently when they target different devices.
 
+`android-mode` also exposes project metadata for integrations:
+
+- `android-project-targets` returns module, variant, application ID, source-root,
+  and preview-task metadata;
+- `android-project-target` resolves one module and variant;
+- `android-target-for-source-file` resolves the target owning a source file;
+- `android-current-target` and `android-current-application-id` reuse the
+  selected target or infer it from the current source file.
+
+These public functions let Logcat and Compose Preview integrations avoid
+relying on `android-mode` internals.
+
 ## Configuration
 
 ```elisp

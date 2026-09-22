@@ -41,6 +41,68 @@
       (should (equal (android--flavor-appid "app" "release")
                      "com.example.release")))))
 
+(ert-deftest android-mode-public-target-api-resolves-source-and-selection ()
+  "Public target APIs expose source and remembered project metadata."
+  (let* ((root "/tmp/project/")
+         (app (list :module-path ":app" :module-name "app"
+                    :module-root "/tmp/project/app" :variant "debug"
+                    :application-id "com.example" :source-roots '("src/main")))
+         (feature (list :module-path ":feature" :module-name "feature"
+                        :module-root "/tmp/project/feature" :variant "release"
+                        :application-id "com.feature" :source-roots '("src/main")))
+         (android--selected-targets nil))
+    (cl-letf (((symbol-function 'android-project-targets)
+               (lambda (&optional _root _refresh) (list app feature))))
+      (should (equal (android-target-for-source-file
+                      "/tmp/project/feature/src/main/Foo.kt" root)
+                     feature))
+      (setf (alist-get root android--selected-targets nil nil #'string=)
+            '("app" . "debug"))
+      (should (equal (android-current-target nil nil root) app))
+      (should (equal (android-current-application-id nil nil root)
+                     "com.example")))))
+
+(ert-deftest android-mode-current-application-id-handles-ambiguity ()
+  "Application ID resolution accepts one ID and rejects ambiguous IDs."
+  (let ((android--selected-targets nil))
+    (cl-letf (((symbol-function 'android-root) (lambda () "/tmp/project/"))
+              ((symbol-function 'android-project-targets)
+               (lambda (&optional _root _refresh)
+                 (list (list :module-name "app" :variant "debug"
+                             :application-id "com.example")
+                       (list :module-name "app" :variant "release"
+                             :application-id "com.example")))))
+      (should (equal (android-current-application-id) "com.example")))
+    (cl-letf (((symbol-function 'android-root) (lambda () "/tmp/project/"))
+              ((symbol-function 'android-project-targets)
+               (lambda (&optional _root _refresh)
+                 (list (list :module-name "app" :variant "debug"
+                             :application-id "com.debug")
+                       (list :module-name "app" :variant "release"
+                             :application-id "com.release")))))
+      (should-not (android-current-application-id)))))
+
+(ert-deftest android-mode-project-targets-forwards-refresh ()
+  "Public project metadata forwards its root and refresh request."
+  (let (seen-root seen-refresh)
+    (cl-letf (((symbol-function 'android--get-flavors)
+               (lambda (&optional refresh)
+                 (setq seen-root default-directory seen-refresh refresh)
+                 (list (list :module-name "app" :variant "debug")))))
+      (should (android-project-targets "/tmp/project" t))
+      (should (equal seen-root "/tmp/project/"))
+      (should seen-refresh))))
+
+(ert-deftest android-mode-public-target-api-ignores-non-project-files ()
+  "Public target APIs return nil outside an Android project."
+  (let ((android--selected-targets nil))
+    (cl-letf (((symbol-function 'android-root)
+               (lambda () (error "No Android project"))))
+      (should-not (android-project-targets))
+      (should-not (android-target-for-source-file "/missing/Foo.kt"))
+      (should-not (android-current-target nil "/missing/Foo.kt"))
+      (should-not (android-current-application-id nil "/missing/Foo.kt")))))
+
 (ert-deftest android-mode-flavor-cache-rejects-old-schema ()
   "Flavor cache entries without the current schema are ignored."
   (let* ((root "/tmp/project/")
