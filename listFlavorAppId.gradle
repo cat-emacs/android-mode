@@ -26,12 +26,10 @@ def addSourceDirectorySet = { proj, roots, sourceDirectorySet ->
     }
 }
 
-def addAndroidSourceRoots = { proj, roots ->
-    def android = proj.extensions.findByName("android")
-    android?.sourceSets?.each { sourceSet ->
-        addSourceDirectorySet(proj, roots, sourceSet?.java)
-        if (sourceSet?.hasProperty("kotlin")) {
-            addSourceDirectorySet(proj, roots, sourceSet.kotlin)
+def addComponentSourceRoots = { proj, roots, component ->
+    [component?.sources?.java, component?.sources?.kotlin].each { directories ->
+        directories?.static?.getOrElse([])?.each { directory ->
+            addRelativeDir(proj, roots, directory.asFile)
         }
     }
 }
@@ -67,11 +65,56 @@ def addKotlinMultiplatformAndroidSourceRoots = { proj, roots, variantName ->
     }
 }
 
-def sourceRoots = { proj, variantName ->
-    def roots = new LinkedHashSet<String>()
-    addAndroidSourceRoots(proj, roots)
-    addKotlinMultiplatformAndroidSourceRoots(proj, roots, variantName)
-    roots.join(";")
+def canonicalComponentKind = { value ->
+    switch ((value ?: "").toString().toLowerCase()) {
+        case "androidtest": return "androidTest"
+        case "unittest": return "unitTest"
+        case "screenshottest": return "screenshotTest"
+        default: return value?.toString() ?: "test"
+    }
+}
+
+def componentRecords = { variant ->
+    def components = [[kind: "main", name: variant.name, component: variant]]
+    if (variant.hasProperty("deviceTests")) {
+        variant.deviceTests.each { name, component ->
+            components.add([kind: canonicalComponentKind(name),
+                            name: component.name, component: component])
+        }
+    } else if (variant.hasProperty("androidTest") && variant.androidTest != null) {
+        components.add([kind: "androidTest", name: variant.androidTest.name,
+                        component: variant.androidTest])
+    }
+    if (variant.hasProperty("hostTests")) {
+        variant.hostTests.each { name, component ->
+            components.add([kind: canonicalComponentKind(name),
+                            name: component.name, component: component])
+        }
+    } else if (variant.hasProperty("unitTest") && variant.unitTest != null) {
+        components.add([kind: "unitTest", name: variant.unitTest.name,
+                        component: variant.unitTest])
+    }
+    components
+}
+
+def encodeField = { value ->
+    (value ?: "").toString().getBytes("UTF-8").encodeBase64().toString()
+}
+
+def serializeComponents = { proj, variant ->
+    def allRoots = new LinkedHashSet<String>()
+    def components = componentRecords(variant).collect { record ->
+        def roots = new LinkedHashSet<String>()
+        addComponentSourceRoots(proj, roots, record.component)
+        if (record.kind == "main") {
+            addKotlinMultiplatformAndroidSourceRoots(proj, roots, variant.name)
+        }
+        allRoots.addAll(roots)
+        [kind: record.kind, name: record.name, roots: roots]
+    }
+    [roots: allRoots.join(";"), serialized: components.collect { component ->
+        "${encodeField(component.kind)}:${encodeField(component.name)}:${encodeField(component.roots.join(';'))}"
+    }.join(",")]
 }
 
 def capitalizeName = { String value ->
@@ -126,7 +169,9 @@ allprojects { proj ->
                         buildRoot: buildRoot,
                         pluginId: pluginId,
                         variantName: variant.name,
+                        variant: variant,
                         applicationId: applicationId,
+                        namespaceProvider: variant.hasProperty("namespace") ? variant.namespace : null,
                         testApplicationIdProvider: testApplicationIdProvider,
                         buildType: buildType,
                         productFlavors: productFlavors,
@@ -145,7 +190,9 @@ gradle.projectsEvaluated {
         def proj = record.project
         def variantName = record.variantName
         def testApplicationId = record.testApplicationIdProvider?.getOrNull() ?: ""
-        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}|${testApplicationId}"
+        def namespace = record.namespaceProvider?.getOrNull() ?: ""
+        def components = serializeComponents(proj, record.variant)
+        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${components.roots}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}|${testApplicationId}|${namespace}|${components.serialized}"
     }
     println "===FLAVORS_END==="
 }

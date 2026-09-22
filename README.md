@@ -85,7 +85,8 @@ Multiple sessions may run concurrently when they target different devices.
 - `android-project-target` returns a module's selected target, or an exact
   variant when one is supplied;
 - `android-target-for-source-file` resolves a file to its module and then that
-  module's selected variant;
+  module's selected variant; when the file belongs to an active source
+  component, the returned target includes `:component`;
 - `android-current-target` uses the source module, the last selected module, or
   the sole Android module;
 - `android-current-application-id` reads only the current selected target's
@@ -103,9 +104,13 @@ last-known in-memory model when one exists. Successful refreshes run
 settings, Gradle build files, wrapper properties, or version catalogs change.
 
 Target metadata includes a composite-build-safe `:module-id`, `:build-root`,
-Gradle module path, module root, plugin ID, variant, main and instrumentation-test
-application IDs, source roots, preview task, build type, product flavors, and
-`:selected-p`. The default selected
+Gradle module path, module root, plugin ID, variant, namespace, main and
+instrumentation-test application IDs, variant-specific source components and
+source roots, preview task, build type, product flavors, and `:selected-p`. Source
+components distinguish main, Android device-test, unit-test, and screenshot-test
+ownership. Their static Java/Kotlin directories come from AGP's public Variant
+API; task-produced generated directories are not forced during Gradle
+configuration. The default selected
 variant follows Android Studio's ordering: DSL-default build types and flavors,
 then `debug`, then flavor and build-type names. User-selected modules and
 variants are persisted under `android-mode-cache-dir` and remain selected while

@@ -37,7 +37,7 @@
   (should
    (equal
     (android-parse-gradle-flavors
-     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application|com.example.test\n===FLAVORS_END===\nignored\n")
+     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin;src/androidTest/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application|com.example.test|com.example.namespace|bWFpbg==:ZGVtb0RlYnVn:c3JjL21haW4va290bGluO3NyYy9kZW1vL2tvdGxpbg==,YW5kcm9pZFRlc3Q=:ZGVtb0RlYnVnQW5kcm9pZFRlc3Q=:c3JjL2FuZHJvaWRUZXN0L2tvdGxpbg==\n===FLAVORS_END===\nignored\n")
     '((:module-id ("/tmp/project" . ":app")
        :build-root "/tmp/project"
        :module-path ":app"
@@ -45,9 +45,15 @@
        :module-root "/tmp/project/app"
        :plugin-id "com.android.application"
        :variant "demoDebug"
+       :namespace "com.example.namespace"
        :application-id "com.example"
        :test-application-id "com.example.test"
-       :source-roots ("src/main/kotlin" "src/demo/kotlin")
+       :components ((:kind "main" :name "demoDebug"
+                     :source-roots ("src/main/kotlin" "src/demo/kotlin"))
+                    (:kind "androidTest" :name "demoDebugAndroidTest"
+                     :source-roots ("src/androidTest/kotlin")))
+       :source-roots ("src/main/kotlin" "src/demo/kotlin"
+                      "src/androidTest/kotlin")
        :preview-task "testDemoDebugUnitTest"
        :build-type "debug"
        :product-flavors ("demo")
@@ -259,12 +265,69 @@
       (should (string-match-p "androidComponents" script))
       (should (string-match-p "com.android.test" script))
       (should (string-match-p "variant.androidTest.applicationId" script))
+      (should (string-match-p "component.*sources" script))
+      (should (string-match-p "directories.*static" script))
       (should (string-match-p "extensions.findByName(\"kotlin\")" script))
       (should (string-match-p "compilations" script))
       (should (string-match-p "platformType == \"jvm\"" script))
       (should (string-match-p "desktopTest" script))
       (should-not (string-match-p "src/commonMain/kotlin" script))
       (should-not (string-match-p "src/androidMain/kotlin" script)))))
+
+(ert-deftest android-mode-target-for-source-file-identifies-component ()
+  "Source lookup reports the selected variant's owning component."
+  (let* ((root "/tmp/project/")
+         (debug
+          (android-mode-tests--target
+           "app" "debug"
+           :source-roots '("src/main/kotlin" "src/androidTest/kotlin")
+           :components '((:kind "main" :name "debug"
+                           :source-roots ("src/main/kotlin"))
+                          (:kind "androidTest" :name "debugAndroidTest"
+                           :source-roots ("src/androidTest/kotlin")))))
+         (release
+          (android-mode-tests--target
+           "app" "release"
+           :source-roots '("src/main/kotlin" "src/release/kotlin")
+           :components '((:kind "main" :name "release"
+                           :source-roots ("src/main/kotlin"
+                                          "src/release/kotlin")))))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--selection-loaded-roots nil)
+         (android--selected-modules nil)
+         (android--selected-variants nil))
+    (cl-letf (((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh) (list release debug))))
+      (let* ((target
+              (android-target-for-source-file
+               "/tmp/project/app/src/androidTest/kotlin/FooTest.kt" root))
+             (component (plist-get target :component)))
+        (should (equal (plist-get target :variant) "debug"))
+        (should (equal (plist-get component :kind) "androidTest"))
+        (should (equal (plist-get component :name) "debugAndroidTest"))))))
+
+(ert-deftest android-mode-target-for-source-file-omits-inactive-component ()
+  "Source lookup never attaches a component from a non-selected variant."
+  (let* ((root "/tmp/project/")
+         (debug (android-mode-tests--target
+                 "app" "debug" :source-roots '("src/main/kotlin")
+                 :components '((:kind "main" :name "debug"
+                                 :source-roots ("src/main/kotlin")))))
+         (release (android-mode-tests--target
+                   "app" "release" :source-roots '("src/release/kotlin")
+                   :components '((:kind "main" :name "release"
+                                   :source-roots ("src/release/kotlin")))))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--selection-loaded-roots nil)
+         (android--selected-modules nil)
+         (android--selected-variants nil))
+    (cl-letf (((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh) (list release debug))))
+      (let ((target
+             (android-target-for-source-file
+              "/tmp/project/app/src/release/kotlin/Foo.kt" root)))
+        (should (equal (plist-get target :variant) "debug"))
+        (should-not (plist-get target :component))))))
 
 (ert-deftest android-mode-gradle-install-reuses-current-project-selection ()
   "Install reuses a previous module and variant selection for the project."

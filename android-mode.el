@@ -296,7 +296,7 @@ Uses aapt2 to find the launchable activity from the built APK."
   :type 'string
   :group 'android)
 
-(defconst android--flavor-cache-version 7
+(defconst android--flavor-cache-version 8
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
@@ -317,8 +317,8 @@ Uses aapt2 to find the launchable activity from the built APK."
 (defvar android--flavor-cache nil
   "Cached flavor data as plist entries.
 Each entry contains :module-id, :build-root, :module-path, :module-name,
-:module-root, :plugin-id, :variant, :application-id, :test-application-id,
-:source-roots, :preview-task,
+:module-root, :plugin-id, :variant, :namespace, :application-id,
+:test-application-id, :components, :source-roots, :preview-task,
 :build-type, :product-flavors, :preferred-build-type-p, and
 :preferred-product-flavors.  Per-project, keyed by project root.")
 
@@ -742,6 +742,23 @@ Gradle and keeps returning an available last-known in-memory model."
         (android-refresh-project-model root)
         memory)))))
 
+(defun android--decode-component-field (value)
+  "Decode Base64 component field VALUE as UTF-8."
+  (decode-coding-string (base64-decode-string (or value "")) 'utf-8))
+
+(defun android--parse-components (value)
+  "Parse encoded component metadata VALUE into plists."
+  (mapcar
+   (lambda (record)
+     (pcase-let ((`(,kind ,name ,source-roots)
+                  (split-string record ":" nil)))
+       (list :kind (android--decode-component-field kind)
+             :name (android--decode-component-field name)
+             :source-roots
+             (split-string
+              (android--decode-component-field source-roots) ";" t))))
+   (split-string (or value "") "," t)))
+
 (defun android-parse-gradle-flavors (gradle-output)
   "Parse GRADLE-OUTPUT and return Android module metadata plists.
 Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
@@ -758,7 +775,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
                          ,source-roots ,preview-task ,build-type
                          ,product-flavors ,preferred-build-type
                          ,preferred-product-flavors ,plugin-id
-                         ,test-application-id)
+                         ,test-application-id ,namespace ,components)
                        (split-string line "|" nil)))
           (when (and module-path module-root variant)
             (push (list :module-id (cons build-root module-path)
@@ -768,8 +785,10 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
                         :module-root module-root
                         :plugin-id (or plugin-id "")
                         :variant variant
+                        :namespace (or namespace "")
                         :application-id (or appid "")
                         :test-application-id (or test-application-id "")
+                        :components (android--parse-components components)
                         :source-roots (split-string (or source-roots "") ";" t)
                         :preview-task (or preview-task "")
                         :build-type (or build-type "")
@@ -829,16 +848,33 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
     (when (android--file-in-directory-p file root)
       (length (file-truename root)))))
 
+(defun android--component-score (file module-root component)
+  "Return best match score for FILE in COMPONENT under MODULE-ROOT."
+  (let ((scores
+         (delq nil
+               (mapcar (lambda (source-root)
+                         (android--target-source-root-score
+                          file module-root source-root))
+                       (plist-get component :source-roots)))))
+    (when scores (apply #'max scores))))
+
+(defun android--target-component-for-file (file entry)
+  "Return the component in ENTRY that most specifically owns FILE."
+  (let ((module-root (plist-get entry :module-root)) best best-score)
+    (dolist (component (plist-get entry :components))
+      (let ((score (android--component-score file module-root component)))
+        (when (and score (or (not best-score) (> score best-score)))
+          (setq best component
+                best-score score))))
+    best))
+
 (defun android--target-score (file entry)
   "Return source-root match score for FILE and module metadata ENTRY."
   (let ((module-root (plist-get entry :module-root)))
     (when (and module-root (android--file-in-directory-p file module-root))
-      (or (seq-max
-           (delq nil
-                 (mapcar (lambda (source-root)
-                           (android--target-source-root-score
-                            file module-root source-root))
-                         (plist-get entry :source-roots))))
+      (or (android--component-score
+           file module-root
+           (list :source-roots (plist-get entry :source-roots)))
           (length (file-truename module-root))))))
 
 (defun android--target-for-source-file (file project-root &optional entries)
@@ -1028,8 +1064,9 @@ REFRESH non-nil, refresh Gradle metadata."
 (defun android-target-for-source-file (file &optional project-root refresh)
   "Return the selected Android target owning FILE under PROJECT-ROOT.
 The file first resolves to a Gradle module, then to that module's selected
-variant, matching Android Studio's build-target lookup.  With REFRESH non-nil,
-refresh Gradle metadata."
+variant, matching Android Studio's build-target lookup.  When the selected
+variant has an owning source component, include it as :component.  With
+REFRESH non-nil, refresh Gradle metadata."
   (let* ((file (expand-file-name file))
          (root (android--project-root
                 (or project-root (android--root-for-file file))))
@@ -1037,10 +1074,13 @@ refresh Gradle metadata."
          (owner (and entries
                      (android--target-for-source-file file root entries))))
     (when owner
-      (let ((target
-             (copy-tree
-              (android--selected-module-variant
-               root (android--module-key owner) entries))))
+      (let* ((target
+              (copy-tree
+               (android--selected-module-variant
+                root (android--module-key owner) entries)))
+             (component (android--target-component-for-file file target)))
+        (when component
+          (setq target (plist-put target :component component)))
         (plist-put target :selected-p t)))))
 
 ;; --- Interactive selection ---
