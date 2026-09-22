@@ -296,7 +296,7 @@ Uses aapt2 to find the launchable activity from the built APK."
   :type 'string
   :group 'android)
 
-(defconst android--flavor-cache-version 6
+(defconst android--flavor-cache-version 7
   "Flavor cache schema version.")
 
 (defvar android-project-model-updated-hook nil
@@ -317,8 +317,8 @@ Uses aapt2 to find the launchable activity from the built APK."
 (defvar android--flavor-cache nil
   "Cached flavor data as plist entries.
 Each entry contains :module-id, :build-root, :module-path, :module-name,
-:module-root, :plugin-id, :variant, :application-id, :source-roots,
-:preview-task,
+:module-root, :plugin-id, :variant, :application-id, :test-application-id,
+:source-roots, :preview-task,
 :build-type, :product-flavors, :preferred-build-type-p, and
 :preferred-product-flavors.  Per-project, keyed by project root.")
 
@@ -757,7 +757,8 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
         (pcase-let ((`(,module-path ,module-root ,build-root ,variant ,appid
                          ,source-roots ,preview-task ,build-type
                          ,product-flavors ,preferred-build-type
-                         ,preferred-product-flavors ,plugin-id)
+                         ,preferred-product-flavors ,plugin-id
+                         ,test-application-id)
                        (split-string line "|" nil)))
           (when (and module-path module-root variant)
             (push (list :module-id (cons build-root module-path)
@@ -768,6 +769,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
                         :plugin-id (or plugin-id "")
                         :variant variant
                         :application-id (or appid "")
+                        :test-application-id (or test-application-id "")
                         :source-roots (split-string (or source-roots "") ";" t)
                         :preview-task (or preview-task "")
                         :build-type (or build-type "")
@@ -967,22 +969,34 @@ With REFRESH non-nil, refresh Gradle metadata."
     (seq-filter (lambda (entry) (plist-get entry :selected-p)) entries)))
 
 (defun android-project-application-ids (&optional project-root refresh)
-  "Return runnable application IDs for all variants in PROJECT-ROOT.
-The result contains distinct, non-empty IDs from application and dynamic
-feature modules.  Missing or stale metadata follows the asynchronous refresh
-behavior of `android-project-variants'.  With REFRESH non-nil, always start a
-refresh."
+  "Return application and test IDs for all Android variants in PROJECT-ROOT.
+The result mirrors Android Studio's project application-ID set: main IDs from
+application, dynamic-feature, and standalone test modules, plus every available
+instrumentation test ID.  Missing or stale metadata follows the asynchronous
+refresh behavior of `android-project-variants'.  With REFRESH non-nil, always
+start a refresh."
   (delete-dups
-   (delq nil
-         (mapcar (lambda (target)
-                   (let ((application-id (plist-get target :application-id)))
-                     (and (member (plist-get target :plugin-id)
-                                  '("com.android.application"
-                                    "com.android.dynamic-feature"))
-                          (stringp application-id)
-                          (not (string-empty-p application-id))
-                          application-id)))
-                 (android-project-variants project-root refresh)))))
+   (apply
+    #'append
+    (mapcar
+     (lambda (target)
+       (let ((plugin-id (plist-get target :plugin-id))
+             (application-id (plist-get target :application-id))
+             (test-application-id (plist-get target :test-application-id)))
+         (delq
+          nil
+          (list
+           (and (member plugin-id
+                        '("com.android.application"
+                          "com.android.dynamic-feature"
+                          "com.android.test"))
+                (stringp application-id)
+                (not (string-empty-p application-id))
+                application-id)
+           (and (stringp test-application-id)
+                (not (string-empty-p test-application-id))
+                test-application-id)))))
+     (android-project-variants project-root refresh)))))
 
 (defun android-project-target (module &optional variant project-root refresh)
   "Return a target for MODULE under PROJECT-ROOT.

@@ -90,8 +90,9 @@ Multiple sessions may run concurrently when they target different devices.
   the sole Android module;
 - `android-current-application-id` reads only the current selected target's
   application ID;
-- `android-project-application-ids` returns the distinct runnable application IDs
-  across all application and dynamic-feature variants;
+- `android-project-application-ids` mirrors Android Studio's project set by
+  returning distinct main IDs for application, dynamic-feature, and standalone
+  test modules together with instrumentation test IDs from every variant;
 - `android-refresh-project-model` refreshes metadata asynchronously and invokes
   an optional completion callback.
 
@@ -102,16 +103,13 @@ last-known in-memory model when one exists. Successful refreshes run
 settings, Gradle build files, wrapper properties, or version catalogs change.
 
 Target metadata includes a composite-build-safe `:module-id`, `:build-root`,
-Gradle module path, module root, plugin ID, variant, application ID, source roots,
-preview task, build type, product flavors, and `:selected-p`. The default selected
+Gradle module path, module root, plugin ID, variant, main and instrumentation-test
+application IDs, source roots, preview task, build type, product flavors, and
+`:selected-p`. The default selected
 variant follows Android Studio's ordering: DSL-default build types and flavors,
 then `debug`, then flavor and build-type names. User-selected modules and
 variants are persisted under `android-mode-cache-dir` and remain selected while
 they are still available.
-
-`android-project-application-ids` currently models main application IDs; distinct
-instrumentation `testApplicationId` values require the future test-component
-model.
 
 These public functions let Logcat and Compose Preview integrations avoid
 relying on `android-mode` internals.

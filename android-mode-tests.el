@@ -21,6 +21,7 @@
                 :plugin-id "com.android.application"
                 :variant variant
                 :application-id (format "com.example.%s" module)
+                :test-application-id ""
                 :source-roots '("src/main/kotlin")
                 :preview-task (format "assemble%s" (capitalize variant))
                 :build-type variant
@@ -36,7 +37,7 @@
   (should
    (equal
     (android-parse-gradle-flavors
-     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application\n===FLAVORS_END===\nignored\n")
+     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application|com.example.test\n===FLAVORS_END===\nignored\n")
     '((:module-id ("/tmp/project" . ":app")
        :build-root "/tmp/project"
        :module-path ":app"
@@ -45,6 +46,7 @@
        :plugin-id "com.android.application"
        :variant "demoDebug"
        :application-id "com.example"
+       :test-application-id "com.example.test"
        :source-roots ("src/main/kotlin" "src/demo/kotlin")
        :preview-task "testDemoDebugUnitTest"
        :build-type "debug"
@@ -255,6 +257,8 @@
     (insert-file-contents android-mode-flavor-script)
     (let ((script (buffer-string)))
       (should (string-match-p "androidComponents" script))
+      (should (string-match-p "com.android.test" script))
+      (should (string-match-p "variant.androidTest.applicationId" script))
       (should (string-match-p "extensions.findByName(\"kotlin\")" script))
       (should (string-match-p "compilations" script))
       (should (string-match-p "platformType == \"jvm\"" script))
@@ -437,21 +441,32 @@
                                (cdr (assoc root android--selected-variants))))
                    "release"))))
 
-(ert-deftest android-mode-project-application-ids-use-all-runnable-variants ()
-  "Project application IDs include every runnable variant exactly once."
-  (let ((targets (list (android-mode-tests--target "app" "debug")
-                       (android-mode-tests--target "demo" "debug")
-                       (android-mode-tests--target
-                        "feature" "debug"
-                        :plugin-id "com.android.dynamic-feature")
-                       (android-mode-tests--target
-                        "library" "debug"
-                        :plugin-id "com.android.library"))))
+(ert-deftest android-mode-project-application-ids-match-studio-model ()
+  "Project application IDs include all main and instrumentation APK IDs."
+  (let ((targets
+         (list
+          (android-mode-tests--target
+           "app" "debug" :test-application-id "com.example.app.test")
+          (android-mode-tests--target
+           "app" "release" :application-id "com.example.app.release"
+           :test-application-id "com.example.app.test")
+          (android-mode-tests--target
+           "feature" "debug" :plugin-id "com.android.dynamic-feature"
+           :test-application-id "com.example.feature.test")
+          (android-mode-tests--target
+           "library" "debug" :plugin-id "com.android.library"
+           :application-id "com.example.library.namespace"
+           :test-application-id "com.example.library.test")
+          (android-mode-tests--target
+           "instrumentation" "debug" :plugin-id "com.android.test"
+           :application-id "com.example.standalone.test"))))
     (cl-letf (((symbol-function 'android-project-variants)
                (lambda (&optional _root _refresh) targets)))
       (should (equal (android-project-application-ids "/tmp/project/")
-                     '("com.example.app" "com.example.demo"
-                       "com.example.feature"))))))
+                     '("com.example.app" "com.example.app.test"
+                       "com.example.app.release" "com.example.feature"
+                       "com.example.feature.test" "com.example.library.test"
+                       "com.example.standalone.test"))))))
 
 (ert-deftest android-mode-project-refresh-is-asynchronous-and-shared ()
   "Concurrent model refresh requests share a process and notify all callers."

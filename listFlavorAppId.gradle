@@ -10,6 +10,7 @@ def androidPluginIds = [
     'com.android.application',
     'com.android.library',
     'com.android.dynamic-feature',
+    'com.android.test',
     'com.android.kotlin.multiplatform.library'
 ]
 
@@ -103,6 +104,10 @@ allprojects { proj ->
             if (androidComponents != null) {
                 androidComponents.onVariants(androidComponents.selector().all()) { variant ->
                     def applicationId = variant.hasProperty("applicationId") ? variant.applicationId.get() : ""
+                    def testApplicationIdProvider =
+                        variant.hasProperty("androidTest") && variant.androidTest != null
+                            ? variant.androidTest.applicationId
+                            : null
                     def buildType = variant.hasProperty("buildType") ? (variant.buildType ?: "") : ""
                     def productFlavors = variant.hasProperty("productFlavors")
                         ? variant.productFlavors.collect { flavor -> flavor.second }.join(",")
@@ -122,6 +127,7 @@ allprojects { proj ->
                         pluginId: pluginId,
                         variantName: variant.name,
                         applicationId: applicationId,
+                        testApplicationIdProvider: testApplicationIdProvider,
                         buildType: buildType,
                         productFlavors: productFlavors,
                         preferredBuildType: preferredBuildTypeFlag,
@@ -138,7 +144,8 @@ gradle.projectsEvaluated {
     flavorRecords.each { record ->
         def proj = record.project
         def variantName = record.variantName
-        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}"
+        def testApplicationId = record.testApplicationIdProvider?.getOrNull() ?: ""
+        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}|${testApplicationId}"
     }
     println "===FLAVORS_END==="
 }
