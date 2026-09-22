@@ -138,7 +138,7 @@ gradle.projectsEvaluated {
     flavorRecords.each { record ->
         def proj = record.project
         def variantName = record.variantName
-        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}"
+        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}|${record.pluginId}"
     }
     println "===FLAVORS_END==="
 }

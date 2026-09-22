@@ -89,14 +89,29 @@ Multiple sessions may run concurrently when they target different devices.
 - `android-current-target` uses the source module, the last selected module, or
   the sole Android module;
 - `android-current-application-id` reads only the current selected target's
-  application ID.
+  application ID;
+- `android-project-application-ids` returns the distinct runnable application IDs
+  across all application and dynamic-feature variants;
+- `android-refresh-project-model` refreshes metadata asynchronously and invokes
+  an optional completion callback.
+
+Project-model reads never wait for Gradle. A missing or stale cache starts one
+shared background refresh per project; callers continue to receive the
+last-known in-memory model when one exists. Successful refreshes run
+`android-project-model-updated-hook`. Disk caches are invalidated when tracked
+settings, Gradle build files, wrapper properties, or version catalogs change.
 
 Target metadata includes a composite-build-safe `:module-id`, `:build-root`,
-Gradle module path, module root, variant, application ID, source roots, preview
-task, build type, product flavors, and `:selected-p`. The default selected
+Gradle module path, module root, plugin ID, variant, application ID, source roots,
+preview task, build type, product flavors, and `:selected-p`. The default selected
 variant follows Android Studio's ordering: DSL-default build types and flavors,
-then `debug`, then flavor and build-type names. A user selection remains the
-selected variant for that module while it is still available.
+then `debug`, then flavor and build-type names. User-selected modules and
+variants are persisted under `android-mode-cache-dir` and remain selected while
+they are still available.
+
+`android-project-application-ids` currently models main application IDs; distinct
+instrumentation `testApplicationId` values require the future test-component
+model.
 
 These public functions let Logcat and Compose Preview integrations avoid
 relying on `android-mode` internals.
@@ -111,8 +126,7 @@ relying on `android-mode` internals.
 `ANDROID_HOME` and a project `local.properties` `sdk.dir` value take precedence
 over `android-mode-sdk-dir`.
 
-Gradle command output is retained in buffers. Flavor discovery writes its
-synchronous Gradle output to `*android-gradle-log*`; build, install, uninstall,
+Gradle project-model discovery runs asynchronously. Build, install, uninstall,
 test, clean, and run tasks use Emacs compilation buffers.
 
 ## Development

@@ -18,6 +18,7 @@
                 :module-path (concat ":" module)
                 :module-name module
                 :module-root root
+                :plugin-id "com.android.application"
                 :variant variant
                 :application-id (format "com.example.%s" module)
                 :source-roots '("src/main/kotlin")
@@ -35,12 +36,13 @@
   (should
    (equal
     (android-parse-gradle-flavors
-     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin|testDemoDebugUnitTest|debug|demo|true|demo\n===FLAVORS_END===\nignored\n")
+     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin|testDemoDebugUnitTest|debug|demo|true|demo|com.android.application\n===FLAVORS_END===\nignored\n")
     '((:module-id ("/tmp/project" . ":app")
        :build-root "/tmp/project"
        :module-path ":app"
        :module-name "app"
        :module-root "/tmp/project/app"
+       :plugin-id "com.android.application"
        :variant "demoDebug"
        :application-id "com.example"
        :source-roots ("src/main/kotlin" "src/demo/kotlin")
@@ -55,8 +57,10 @@
   (cl-letf (((symbol-function 'android-root)
              (lambda () default-directory)))
     (let ((android--flavor-cache '(("app" "debug" "com.example")
-                                   ("app" "release" "com.example.release")))
-          (android--flavor-cache-root default-directory))
+                                    ("app" "release" "com.example.release")))
+          (android--flavor-cache-root
+           (file-name-as-directory (expand-file-name default-directory)))
+          (android--flavor-cache-fingerprint nil))
       (should (equal (android--flavor-modules) '("app")))
       (should (equal (android--flavor-variants "app") '("debug" "release")))
       (should (equal (android--flavor-appid "app" "release")
@@ -68,6 +72,8 @@
          (app-debug (android-mode-tests--target "app" "debug"))
          (app-release (android-mode-tests--target "app" "release"))
          (feature (android-mode-tests--target "feature" "release"))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--selection-loaded-roots nil)
          (android--selected-modules nil)
          (android--selected-variants nil))
     (cl-letf (((symbol-function 'android--get-flavors)
@@ -309,6 +315,231 @@
                        ":demo:installStaging"
                        ":demo:installStaging")))
       (should-not answers))))
+
+(ert-deftest android-mode-hot-model-read-does-not-stat-project-inputs ()
+  "A normal read of a fresh in-memory model performs no filesystem scan."
+  (let* ((root "/tmp/project/")
+         (entry (android-mode-tests--target "app" "debug"))
+         (android--flavor-cache (list entry))
+         (android--flavor-cache-root root)
+         (android--flavor-cache-stale-p nil))
+    (let ((default-directory root))
+      (cl-letf (((symbol-function 'android-root) (lambda () root))
+                ((symbol-function 'android--project-model-fingerprint)
+                 (lambda (&rest _args)
+                   (ert-fail "hot read fingerprinted project inputs")))
+                ((symbol-function 'android--selection-load) #'ignore))
+        (should (equal (android--get-flavors) (list entry)))))))
+
+(ert-deftest android-mode-stale-disk-model-remains-available ()
+  "A stale schema-valid disk model is returned while refresh starts."
+  (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--flavor-cache nil)
+         (android--flavor-cache-root nil)
+         (android--flavor-cache-fingerprint nil)
+         (android--flavor-cache-stale-p t)
+         (entry (android-mode-tests--target "app" "debug"))
+         (settings (expand-file-name "settings.gradle.kts" root))
+         refreshed)
+    (plist-put entry :build-root (directory-file-name root))
+    (plist-put entry :module-root (expand-file-name "app" root))
+    (make-directory (plist-get entry :module-root) t)
+    (with-temp-file settings (insert "include(\":app\")\n"))
+    (android--flavor-cache-save root (list entry))
+    (setq android--flavor-cache nil
+          android--flavor-cache-root nil
+          android--flavor-cache-fingerprint nil
+          android--flavor-cache-stale-p t)
+    (with-temp-file settings (insert "include(\":app\", \":feature\")\n"))
+    (let ((default-directory root))
+      (cl-letf (((symbol-function 'android-root) (lambda () root))
+                ((symbol-function 'android-refresh-project-model)
+                 (lambda (&optional _root _callback)
+                   (setq refreshed t))))
+        (should (equal (android--get-flavors) (list entry)))
+        (should refreshed)
+        (should android--flavor-cache-stale-p)))))
+
+(ert-deftest android-mode-cache-read-disables-read-time-evaluation ()
+  "Persisted state cannot execute read-time Lisp forms."
+  (let* ((root "/tmp/project/")
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android-mode-tests--read-evaluated nil)
+         (selection (android--selection-file root)))
+    (make-directory (file-name-directory selection) t)
+    (with-temp-file selection
+      (insert "#.(setq android-mode-tests--read-evaluated t)"))
+    (let ((android--selection-loaded-roots nil))
+      (android--selection-load root))
+    (should-not android-mode-tests--read-evaluated)))
+
+(ert-deftest android-mode-selection-reports-loading-model ()
+  "Interactive target selection does not open an empty completion UI."
+  (cl-letf (((symbol-function 'android-project-targets) #'ignore))
+    (should-error (android--select-module-target)
+                  :type 'user-error)))
+
+(ert-deftest android-mode-project-model-fingerprint-detects-input-changes ()
+  "Project model fingerprints cover settings, module builds, and catalogs."
+  (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
+         (module-root (expand-file-name "app" root))
+         (catalog (expand-file-name "gradle/libs.versions.toml" root))
+         (entry (android-mode-tests--target "app" "debug")))
+    (make-directory module-root t)
+    (make-directory (file-name-directory catalog) t)
+    (plist-put entry :build-root (directory-file-name root))
+    (plist-put entry :module-root module-root)
+    (with-temp-file (expand-file-name "settings.gradle.kts" root)
+      (insert "include(\":app\")\n"))
+    (with-temp-file (expand-file-name "build.gradle.kts" module-root)
+      (insert "plugins {}\n"))
+    (with-temp-file catalog (insert "[versions]\nagp = \"9.3.0\"\n"))
+    (let ((before (android--project-model-fingerprint root (list entry))))
+      (with-temp-file catalog (insert "[versions]\nagp = \"9.3.1\"\n"))
+      (should-not
+       (equal before
+              (android--project-model-fingerprint root (list entry)))))))
+
+(ert-deftest android-mode-flavor-cache-rejects-changed-project-inputs ()
+  "A disk model is invalidated when a tracked Gradle input changes."
+  (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--flavor-cache-fingerprint nil)
+         (entry (android-mode-tests--target "app" "debug"))
+         (settings (expand-file-name "settings.gradle.kts" root)))
+    (plist-put entry :build-root (directory-file-name root))
+    (plist-put entry :module-root (expand-file-name "app" root))
+    (make-directory (plist-get entry :module-root) t)
+    (with-temp-file settings (insert "include(\":app\")\n"))
+    (android--flavor-cache-save root (list entry))
+    (should (plist-get (android--flavor-cache-load root) :fresh-p))
+    (with-temp-file settings (insert "include(\":app\", \":feature\")\n"))
+    (let ((cache (android--flavor-cache-load root)))
+      (should cache)
+      (should-not (plist-get cache :fresh-p)))))
+
+(ert-deftest android-mode-target-selection-persists-by-module-id ()
+  "Selected modules and variants survive a fresh in-memory session."
+  (let* ((root "/tmp/project/")
+         (module-id '("/tmp/project" . ":app"))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--selected-modules nil)
+         (android--selected-variants nil)
+         (android--selection-loaded-roots nil))
+    (android--remember-target root module-id "release")
+    (setq android--selected-modules nil
+          android--selected-variants nil
+          android--selection-loaded-roots nil)
+    (android--selection-load root)
+    (should (equal (cdr (assoc root android--selected-modules)) module-id))
+    (should (equal (cdr (assoc module-id
+                               (cdr (assoc root android--selected-variants))))
+                   "release"))))
+
+(ert-deftest android-mode-project-application-ids-use-all-runnable-variants ()
+  "Project application IDs include every runnable variant exactly once."
+  (let ((targets (list (android-mode-tests--target "app" "debug")
+                       (android-mode-tests--target "demo" "debug")
+                       (android-mode-tests--target
+                        "feature" "debug"
+                        :plugin-id "com.android.dynamic-feature")
+                       (android-mode-tests--target
+                        "library" "debug"
+                        :plugin-id "com.android.library"))))
+    (cl-letf (((symbol-function 'android-project-variants)
+               (lambda (&optional _root _refresh) targets)))
+      (should (equal (android-project-application-ids "/tmp/project/")
+                     '("com.example.app" "com.example.demo"
+                       "com.example.feature"))))))
+
+(ert-deftest android-mode-project-refresh-is-asynchronous-and-shared ()
+  "Concurrent model refresh requests share a process and notify all callers."
+  (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--project-refresh-processes (make-hash-table :test #'equal))
+         (android--project-refresh-callbacks (make-hash-table :test #'equal))
+         (android--flavor-cache nil)
+         (android--flavor-cache-root nil)
+         callbacks)
+    (cl-letf (((symbol-function 'android--gradle-model-command)
+               (lambda (_root)
+                 (list shell-file-name shell-command-switch
+                       "printf '===FLAVORS_START===\\n:app|/tmp/app|/tmp|debug|com.example|src/main/kotlin|assembleDebug|debug||false||com.android.application\\n===FLAVORS_END===\\n'"))))
+      (let ((first (android-refresh-project-model
+                    root (lambda (data error-data)
+                           (push (list data error-data) callbacks))))
+            second)
+        (setq second
+              (android-refresh-project-model
+               root (lambda (data error-data)
+                      (push (list data error-data) callbacks))))
+        (should (eq first second))
+        (while (and (< (length callbacks) 2)
+                    (or (process-live-p first)
+                        (gethash root android--project-refresh-processes)))
+          (accept-process-output nil 0.1))
+        (should (= (length callbacks) 2))
+        (should (seq-every-p (lambda (result)
+                               (and (car result) (null (cadr result))))
+                             callbacks))
+        (should-not (gethash root android--project-refresh-processes))))))
+
+(ert-deftest android-mode-project-refresh-restarts-after-input-change ()
+  "A refresh whose inputs change is discarded and restarted."
+  (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
+         (settings (expand-file-name "settings.gradle.kts" root))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--project-refresh-processes (make-hash-table :test #'equal))
+         (android--project-refresh-callbacks (make-hash-table :test #'equal))
+         launches done result failure)
+    (with-temp-file settings (insert "include(\":app\")\n"))
+    (cl-letf (((symbol-function 'android--gradle-model-command)
+               (lambda (_root)
+                 (setq launches (1+ (or launches 0)))
+                 (list shell-file-name shell-command-switch
+                       "sleep 0.1; printf '===FLAVORS_START===\\n:app|/tmp/app|/tmp|debug|com.example|src/main/kotlin|assembleDebug|debug||false||com.android.application\\n===FLAVORS_END===\\n'"))))
+      (android-refresh-project-model
+       root (lambda (data error-data)
+              (setq result data failure error-data done t)))
+      (with-temp-file settings (insert "include(\":app\", \":feature\")\n"))
+      (while (and (not done) (< launches 3))
+        (accept-process-output nil 0.2))
+      (should done)
+      (should (= launches 2))
+      (should result)
+      (should-not failure))))
+
+(ert-deftest android-mode-project-refresh-rechecks-after-parsing ()
+  "Inputs changed during parsing prevent stale model publication."
+  (let* ((root (file-name-as-directory (make-temp-file "android-project" t)))
+         (settings (expand-file-name "settings.gradle.kts" root))
+         (android-mode-cache-dir (make-temp-file "android-cache" t))
+         (android--project-refresh-processes (make-hash-table :test #'equal))
+         (android--project-refresh-callbacks (make-hash-table :test #'equal))
+         (android--project-refresh-invalidated (make-hash-table :test #'equal))
+         (real-parser (symbol-function 'android-parse-gradle-flavors))
+         parsed launches done result)
+    (with-temp-file settings (insert "include(\":app\")\n"))
+    (cl-letf (((symbol-function 'android--gradle-model-command)
+               (lambda (_root)
+                 (setq launches (1+ (or launches 0)))
+                 (list shell-file-name shell-command-switch
+                       "printf '===FLAVORS_START===\\n:app|/tmp/app|/tmp|debug|com.example|src/main/kotlin|assembleDebug|debug||false||com.android.application\\n===FLAVORS_END===\\n'")))
+              ((symbol-function 'android-parse-gradle-flavors)
+               (lambda (output)
+                 (unless parsed
+                   (setq parsed t)
+                   (with-temp-file settings
+                     (insert "include(\":app\", \":feature\")\n")))
+                 (funcall real-parser output))))
+      (android-refresh-project-model
+       root (lambda (data _error-data) (setq result data done t)))
+      (while (and (not done) (< launches 3))
+        (accept-process-output nil 0.2))
+      (should done)
+      (should (= launches 2))
+      (should result))))
 
 (provide 'android-mode-tests)
 

@@ -35,6 +35,7 @@
 ;;; Code:
 
 (require 'project)
+(require 'filenotify nil t)
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
@@ -71,9 +72,6 @@ available."
   (expand-file-name "listFlavorAppId.gradle"
                     (file-name-directory (or load-file-name buffer-file-name)))
   "Gradle init script path relative to this Emacs Lisp file.")
-
-(defvar android-mode-gradle-log-buffer-name "*android-gradle-log*"
-  "Buffer name used for synchronous android-mode Gradle output.")
 
 (defvar android--selected-modules nil
   "Alist of current Android module IDs keyed by project root.")
@@ -298,35 +296,143 @@ Uses aapt2 to find the launchable activity from the built APK."
   :type 'string
   :group 'android)
 
-(defconst android--flavor-cache-version 4
+(defconst android--flavor-cache-version 6
   "Flavor cache schema version.")
+
+(defvar android-project-model-updated-hook nil
+  "Hook run after an Android project model refresh succeeds.")
+
+(defvar android--project-refresh-processes (make-hash-table :test #'equal)
+  "Active project model refresh processes keyed by project root.")
+
+(defvar android--project-refresh-callbacks (make-hash-table :test #'equal)
+  "Pending project model refresh callbacks keyed by project root.")
+
+(defvar android--project-refresh-invalidated (make-hash-table :test #'equal)
+  "Roots changed while their project model refresh was running.")
+
+(defvar android--selection-loaded-roots nil
+  "Project roots whose persisted target selection has been loaded.")
 
 (defvar android--flavor-cache nil
   "Cached flavor data as plist entries.
 Each entry contains :module-id, :build-root, :module-path, :module-name,
-:module-root, :variant, :application-id, :source-roots, :preview-task,
+:module-root, :plugin-id, :variant, :application-id, :source-roots,
+:preview-task,
 :build-type, :product-flavors, :preferred-build-type-p, and
 :preferred-product-flavors.  Per-project, keyed by project root.")
 
 (defvar android--flavor-cache-root nil
   "Project root for which `android--flavor-cache' is valid.")
 
+(defvar android--flavor-cache-fingerprint nil
+  "Input fingerprint for `android--flavor-cache'.")
+
+(defvar android--flavor-cache-stale-p t
+  "Non-nil when the in-memory project model needs refresh.")
+
+(defvar android--project-watch-descriptors (make-hash-table :test #'equal)
+  "File notification descriptors keyed by project root.")
+
+(defvar android--project-watch-roots (make-hash-table :test #'equal)
+  "Project roots keyed by file notification descriptor.")
+
+(defvar android--project-watch-inputs (make-hash-table :test #'equal)
+  "Tracked project model input files keyed by project root.")
+
+(defvar android--project-watch-fingerprints (make-hash-table :test #'equal)
+  "Last lightweight input signatures keyed by project root.")
+
+(defvar android--project-watch-timer nil
+  "Idle timer used when native file notifications are unavailable.")
+
+(defun android--selection-file (root)
+  "Return the target selection file path for project ROOT."
+  (let ((key (md5 (directory-file-name (expand-file-name root)))))
+    (expand-file-name (concat key "-selection.eld") android-mode-cache-dir)))
+
+(defun android--file-signature (file)
+  "Return a lightweight metadata signature for FILE."
+  (if (file-directory-p file)
+      (mapcar (lambda (entry)
+                (cons (file-name-nondirectory entry)
+                      (android--file-signature entry)))
+              (directory-files file t "\\.toml\\'" t))
+    (when-let* ((attributes (file-attributes file 'string)))
+      (list (file-attribute-type attributes)
+            (file-attribute-size attributes)
+            (file-attribute-modification-time attributes)
+            (file-attribute-status-change-time attributes)))))
+
+(defun android--project-model-input-files (root &optional data)
+  "Return model input files for ROOT and cached model DATA."
+  (let* ((build-roots
+          (delete-dups
+           (cons root (delq nil (mapcar (lambda (entry)
+                                         (plist-get entry :build-root))
+                                       data)))))
+         (module-roots
+          (delete-dups (delq nil (mapcar (lambda (entry)
+                                           (plist-get entry :module-root))
+                                         data))))
+         files)
+    (dolist (dir (append build-roots module-roots))
+      (dolist (name '("build.gradle" "build.gradle.kts" "gradle.properties"
+                      "settings.gradle" "settings.gradle.kts"))
+        (push (expand-file-name name dir) files)))
+    (dolist (dir build-roots)
+      (push (expand-file-name "gradle/wrapper/gradle-wrapper.properties" dir)
+            files)
+      (let ((catalog-dir (expand-file-name "gradle" dir)))
+        (push catalog-dir files)
+        (when (file-directory-p catalog-dir)
+          (setq files (nconc (directory-files catalog-dir t "\\.toml\\'" t)
+                             files)))))
+    (sort (delete-dups files) #'string<)))
+
+(defun android--project-model-fingerprint (root &optional data inputs)
+  "Return a lightweight signature of project inputs for ROOT and DATA.
+When INPUTS is non-nil, use that exact path list."
+  (secure-hash
+   'sha256
+   (prin1-to-string
+    (mapcar (lambda (file)
+              (cons file (android--file-signature file)))
+            (or inputs (android--project-model-input-files root data))))))
+
 (defun android--flavor-cache-file (root)
   "Return the disk cache file path for project ROOT."
   (let ((key (md5 (directory-file-name (expand-file-name root)))))
     (expand-file-name (concat key ".eld") android-mode-cache-dir)))
 
+(defun android--atomic-write (file value)
+  "Write Lisp VALUE atomically to FILE without broad permissions."
+  (make-directory (file-name-directory file) t)
+  (let ((temporary (make-temp-file
+                    (expand-file-name ".android-mode-" (file-name-directory file)))))
+    (unwind-protect
+        (progn
+          (set-file-modes temporary #o600)
+          (with-temp-file temporary
+            (prin1 value (current-buffer)))
+          (rename-file temporary file t))
+      (when (file-exists-p temporary)
+        (delete-file temporary)))))
+
 (defun android--flavor-cache-save (root data)
   "Persist flavor DATA for project ROOT to disk."
-  (let ((file (android--flavor-cache-file root)))
+  (let* ((file (android--flavor-cache-file root))
+         (inputs (android--project-model-input-files root data))
+         (fingerprint (android--project-model-fingerprint root data inputs)))
     (android--log "saving flavor cache for %s to %s" root file)
-    (make-directory (file-name-directory file) t)
-    (with-temp-file file
-      (prin1 (list :version android--flavor-cache-version
-                   :root root
-                   :time (current-time)
-                   :data data)
-             (current-buffer)))))
+    (android--atomic-write
+     file
+     (list :version android--flavor-cache-version
+           :root root :time (current-time)
+           :inputs inputs :fingerprint fingerprint :data data))
+    (setq android--flavor-cache-fingerprint fingerprint
+          android--flavor-cache-stale-p nil)
+    (android--watch-project-inputs root inputs)))
 
 (defun android--flavor-cache-valid-p (data)
   "Return non-nil when DATA matches the current flavor cache schema."
@@ -338,6 +444,7 @@ Each entry contains :module-id, :build-root, :module-path, :module-name,
                (plist-get entry :build-root)
                (plist-get entry :module-path)
                (plist-get entry :module-root)
+               (plist-get entry :plugin-id)
                (plist-get entry :variant)
                (plist-member entry :source-roots)
                (plist-member entry :preview-task)
@@ -348,66 +455,292 @@ Each entry contains :module-id, :build-root, :module-path, :module-name,
         data)))
 
 (defun android--flavor-cache-load (root)
-  "Load cached flavor data for project ROOT from disk.
-Returns the data list, or nil if no valid cache exists."
+  "Load schema-valid cached flavor data for project ROOT.
+Return a plist with :data and :fresh-p, or nil for an invalid cache."
   (let ((file (android--flavor-cache-file root)))
     (when (file-exists-p file)
       (android--log "loading flavor cache for %s from %s" root file)
       (ignore-errors
         (with-temp-buffer
           (insert-file-contents file)
-          (let ((plist (read (current-buffer))))
+          (let* ((plist (read (current-buffer)))
+                 (data (plist-get plist :data))
+                 (inputs (plist-get plist :inputs))
+                 (fingerprint (plist-get plist :fingerprint))
+                 (current-fingerprint
+                  (when (and (listp inputs) (listp data))
+                    (android--project-model-fingerprint
+                     root data inputs))))
             (when (and (= (or (plist-get plist :version) 0)
                           android--flavor-cache-version)
                        (string= (plist-get plist :root) root)
-                       (android--flavor-cache-valid-p
-                        (plist-get plist :data)))
-              (plist-get plist :data))))))))
+                       (android--flavor-cache-valid-p data))
+              (list :data data :inputs inputs
+                    :fingerprint fingerprint
+                    :current-fingerprint current-fingerprint
+                    :fresh-p (equal fingerprint current-fingerprint)))))))))
 
-(defun android--run-gradle-for-output (root command)
-  "Run Gradle COMMAND in ROOT, write logs, and return its output."
-  (android-in-directory
-   root
-   (let ((buffer (get-buffer-create android-mode-gradle-log-buffer-name)))
-     (android--log "running Gradle in %s: %s" root command)
-     (with-current-buffer buffer
-       (let ((inhibit-read-only t))
-         (erase-buffer)
-         (insert (format "$ %s\n\n" command)))
-       (setq-local default-directory root)
-       (let ((exit-code (call-process-shell-command command nil buffer t)))
-         (android--log "Gradle command exited with code %s" exit-code)
-         (buffer-string))))))
+(defun android--module-id-p (value)
+  "Return non-nil when VALUE is a stable Android module ID."
+  (and (consp value) (stringp (car value)) (stringp (cdr value))))
+
+(defun android--selection-state-valid-p (state root)
+  "Return non-nil when persisted selection STATE is valid for ROOT."
+  (let ((module (plist-get state :module))
+        (variants (plist-get state :variants)))
+    (and (= (or (plist-get state :version) 0) 1)
+         (string= (plist-get state :root) root)
+         (or (null module) (android--module-id-p module))
+         (listp variants)
+         (seq-every-p
+          (lambda (entry)
+            (and (android--module-id-p (car entry))
+                 (stringp (cdr entry))))
+          variants))))
+
+(defun android--selection-load (root)
+  "Load persisted target selection for ROOT once."
+  (unless (member root android--selection-loaded-roots)
+    (push root android--selection-loaded-roots)
+    (let ((file (android--selection-file root)))
+      (when (file-readable-p file)
+        (ignore-errors
+          (with-temp-buffer
+            (insert-file-contents file)
+            (let ((state (read (current-buffer))))
+              (when (android--selection-state-valid-p state root)
+                (setf (alist-get root android--selected-modules
+                                 nil nil #'string=)
+                      (plist-get state :module))
+                (setf (alist-get root android--selected-variants
+                                 nil nil #'string=)
+                      (plist-get state :variants))))))))))
+
+(defun android--selection-save (root)
+  "Persist the current target selection for ROOT."
+  (android--atomic-write
+   (android--selection-file root)
+   (list :version 1 :root root
+         :module (cdr (assoc root android--selected-modules))
+         :variants (cdr (assoc root android--selected-variants)))))
+
+(defun android--project-watch-event-relevant-p (root event)
+  "Return non-nil when file notification EVENT affects model ROOT."
+  (let ((inputs (gethash root android--project-watch-inputs)))
+    (seq-some
+     (lambda (file)
+       (and file
+            (or (member file inputs)
+                (and (string-suffix-p ".toml" file)
+                     (seq-some
+                      (lambda (input)
+                        (and (file-directory-p input)
+                             (string= (file-name-directory file)
+                                      (file-name-as-directory input))))
+                      inputs)))))
+     (cddr event))))
+
+(defun android--mark-project-model-stale (root)
+  "Mark ROOT stale and start one asynchronous refresh."
+  (when (gethash root android--project-refresh-processes)
+    (puthash root t android--project-refresh-invalidated))
+  (when (equal root android--flavor-cache-root)
+    (setq android--flavor-cache-stale-p t))
+  (android-refresh-project-model root))
+
+(defun android--project-watch-callback (event)
+  "Mark a project model stale in response to file notification EVENT."
+  (when-let* ((descriptor (car event))
+              (root (gethash descriptor android--project-watch-roots))
+              ((android--project-watch-event-relevant-p root event)))
+    (android--mark-project-model-stale root)))
+
+(defun android--check-project-watch-inputs ()
+  "Refresh watched projects whose lightweight input signature changed."
+  (maphash
+   (lambda (root inputs)
+     (let ((fingerprint (android--project-model-fingerprint root nil inputs)))
+       (unless (equal fingerprint
+                      (gethash root android--project-watch-fingerprints))
+         (puthash root fingerprint android--project-watch-fingerprints)
+         (android--mark-project-model-stale root))))
+   android--project-watch-inputs))
+
+(defun android--project-input-saved ()
+  "Refresh a project when the saved buffer is a tracked model input."
+  (when buffer-file-name
+    (maphash
+     (lambda (root inputs)
+       (when (member buffer-file-name inputs)
+         (android--mark-project-model-stale root)))
+     android--project-watch-inputs)))
+
+(defun android--watch-project-inputs (root inputs)
+  "Watch model INPUTS for ROOT and install an idle fallback."
+  (dolist (descriptor (gethash root android--project-watch-descriptors))
+    (remhash descriptor android--project-watch-roots)
+    (ignore-errors (file-notify-rm-watch descriptor)))
+  (let (descriptors)
+    (when (fboundp 'file-notify-add-watch)
+      (dolist (file inputs)
+        (let ((target (if (file-exists-p file)
+                          file
+                        (file-name-directory file))))
+          (when (and target (file-exists-p target))
+            (ignore-errors
+              (let ((descriptor
+                     (file-notify-add-watch
+                      target '(change attribute-change)
+                      #'android--project-watch-callback)))
+                (puthash descriptor root android--project-watch-roots)
+                (push descriptor descriptors)))))))
+    (puthash root descriptors android--project-watch-descriptors)
+    (puthash root inputs android--project-watch-inputs)
+    (puthash root (android--project-model-fingerprint root nil inputs)
+             android--project-watch-fingerprints)
+    (unless (timerp android--project-watch-timer)
+      (setq android--project-watch-timer
+            (run-with-idle-timer 2 t #'android--check-project-watch-inputs)))))
+
+(defun android--flavor-cache-current-p (root)
+  "Return non-nil when the in-memory model for ROOT is not marked stale."
+  (and android--flavor-cache
+       (string= root android--flavor-cache-root)
+       (not android--flavor-cache-stale-p)))
+
+(defun android--gradle-model-command (root)
+  "Return the Gradle project model command for ROOT."
+  (list (expand-file-name "gradlew" root)
+        "--no-configuration-cache" "-I" android-mode-flavor-script
+        "help" "--quiet"))
+
+(defun android--finish-project-refresh (root data error-data)
+  "Finish the project model refresh for ROOT with DATA or ERROR-DATA."
+  (let ((callbacks (prog1 (gethash root android--project-refresh-callbacks)
+                     (remhash root android--project-refresh-callbacks))))
+    (remhash root android--project-refresh-processes)
+    (when data
+      (setq android--flavor-cache data
+            android--flavor-cache-root root)
+      (android--flavor-cache-save root data)
+      (run-hook-with-args 'android-project-model-updated-hook root data))
+    (dolist (callback callbacks)
+      (funcall callback data error-data))))
+
+(defun android--project-refresh-stale-p (root start-fingerprint inputs)
+  "Return non-nil if ROOT's INPUTS changed from START-FINGERPRINT."
+  (or (gethash root android--project-refresh-invalidated)
+      (not (equal start-fingerprint
+                  (android--project-model-fingerprint root nil inputs)))))
+
+(defun android--restart-project-refresh (root callbacks)
+  "Restart a stale refresh for ROOT and preserve CALLBACKS."
+  (remhash root android--project-refresh-processes)
+  (puthash root callbacks android--project-refresh-callbacks)
+  (android--log "project inputs changed during refresh; restarting %s" root)
+  (android-refresh-project-model root))
+
+(defun android--project-refresh-sentinel (process event)
+  "Handle project model refresh PROCESS completion described by EVENT."
+  (when (memq (process-status process) '(exit signal))
+    (let* ((root (process-get process 'android-project-root))
+           (buffer (process-buffer process))
+           (current (gethash root android--project-refresh-processes))
+           (output (when (buffer-live-p buffer)
+                     (with-current-buffer buffer (buffer-string)))))
+      (when (eq process current)
+        (let ((start-fingerprint
+               (process-get process 'android-project-input-fingerprint))
+              (inputs (process-get process 'android-project-inputs)))
+          (if (android--project-refresh-stale-p
+               root start-fingerprint inputs)
+              (progn
+                (remhash root android--project-refresh-invalidated)
+                (android--restart-project-refresh
+                 root (gethash root android--project-refresh-callbacks)))
+            (if (and (= (process-exit-status process) 0) output)
+                (let ((data (android-parse-gradle-flavors output)))
+                  (cond
+                   ((android--project-refresh-stale-p
+                     root start-fingerprint inputs)
+                    (remhash root android--project-refresh-invalidated)
+                    (android--restart-project-refresh
+                     root (gethash root android--project-refresh-callbacks)))
+                   (data
+                    (android--log "refreshed %d flavor entries" (length data))
+                    (android--finish-project-refresh root data nil))
+                   (t
+                    (android--finish-project-refresh
+                     root nil "Gradle returned no Android project model"))))
+              (android--finish-project-refresh
+               root nil (string-trim (or output event)))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(defun android-refresh-project-model (&optional project-root callback)
+  "Refresh PROJECT-ROOT asynchronously and return its process.
+CALLBACK, when non-nil, is called with two arguments DATA and ERROR.  Multiple
+requests for the same root share one Gradle process."
+  (when-let* ((root (android--project-root project-root)))
+    (when callback
+      (puthash root
+               (append (gethash root android--project-refresh-callbacks)
+                       (list callback))
+               android--project-refresh-callbacks))
+    (or (gethash root android--project-refresh-processes)
+        (let* ((inputs (android--project-model-input-files
+                        root (and (string= root android--flavor-cache-root)
+                                  android--flavor-cache)))
+               (fingerprint (android--project-model-fingerprint root nil inputs))
+               (buffer (generate-new-buffer " *android-project-model*"))
+               (default-directory root)
+               (process
+                (make-process
+                 :name (format "android-project-model-%s"
+                               (file-name-nondirectory
+                                (directory-file-name root)))
+                 :buffer buffer :command (android--gradle-model-command root)
+                 :connection-type 'pipe :noquery t
+                 :sentinel #'ignore)))
+          (with-current-buffer buffer
+            (setq-local default-directory root))
+          (process-put process 'android-project-root root)
+          (process-put process 'android-project-inputs inputs)
+          (process-put process 'android-project-input-fingerprint fingerprint)
+          (remhash root android--project-refresh-invalidated)
+          (puthash root process android--project-refresh-processes)
+          (set-process-sentinel process #'android--project-refresh-sentinel)
+          (android--log "refreshing project model for %s asynchronously" root)
+          process))))
 
 (defun android--get-flavors (&optional refresh)
-  "Return flavor data as list of (MODULE VARIANT APPID).
-Caches in memory and on disk under `android-mode-cache-dir'.
-With REFRESH non-nil, re-fetch from gradle."
-  (let ((root (android-root)))
-    (android--log "resolving flavors for %s%s"
-                  root
-                  (if refresh " with refresh" ""))
-    (when (or refresh
-              (not android--flavor-cache)
-              (not (string= root android--flavor-cache-root)))
-      ;; try disk cache first
-      (let ((disk (unless refresh (android--flavor-cache-load root))))
-        (if disk
-            (setq android--flavor-cache disk
-                  android--flavor-cache-root root)
-          ;; fetch from gradle
-          (android-in-directory
-           root
-           (let* ((script android-mode-flavor-script)
-                  (command (format "./gradlew --no-configuration-cache -I %s help --quiet"
-                                   (shell-quote-argument script)))
-                  (output (android--run-gradle-for-output root command))
-                  (data (android-parse-gradle-flavors output)))
-             (android--log "parsed %d flavor entries" (length data))
-             (setq android--flavor-cache data
-                   android--flavor-cache-root root)
-             (android--flavor-cache-save root data))))))
-    android--flavor-cache))
+  "Return flavor data while refreshing stale metadata asynchronously.
+With REFRESH non-nil, always request a refresh.  This function never waits for
+Gradle and keeps returning an available last-known in-memory model."
+  (when-let* ((root (android--project-root)))
+    (android--selection-load root)
+    (let ((memory (and android--flavor-cache
+                       (string= root android--flavor-cache-root)
+                       android--flavor-cache)))
+      (cond
+       ((and (not refresh) (android--flavor-cache-current-p root)) memory)
+       ((and (not refresh)
+             (let ((cache (android--flavor-cache-load root)))
+               (when cache
+                 (setq android--flavor-cache (plist-get cache :data)
+                       android--flavor-cache-root root
+                       android--flavor-cache-fingerprint
+                       (plist-get cache :fingerprint)
+                       android--flavor-cache-stale-p
+                       (not (plist-get cache :fresh-p)))
+                 (android--watch-project-inputs root (plist-get cache :inputs))
+                 (when android--flavor-cache-stale-p
+                   (android-refresh-project-model root))
+                 t)))
+        android--flavor-cache)
+       (t
+        (android-refresh-project-model root)
+        memory)))))
 
 (defun android-parse-gradle-flavors (gradle-output)
   "Parse GRADLE-OUTPUT and return Android module metadata plists.
@@ -424,7 +757,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
         (pcase-let ((`(,module-path ,module-root ,build-root ,variant ,appid
                          ,source-roots ,preview-task ,build-type
                          ,product-flavors ,preferred-build-type
-                         ,preferred-product-flavors)
+                         ,preferred-product-flavors ,plugin-id)
                        (split-string line "|" nil)))
           (when (and module-path module-root variant)
             (push (list :module-id (cons build-root module-path)
@@ -432,6 +765,7 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
                         :module-path module-path
                         :module-name (string-remove-prefix ":" module-path)
                         :module-root module-root
+                        :plugin-id (or plugin-id "")
                         :variant variant
                         :application-id (or appid "")
                         :source-roots (split-string (or source-roots "") ";" t)
@@ -578,10 +912,13 @@ ENTRIES defaults to `android--get-flavors'."
     (file-name-as-directory (expand-file-name root))))
 
 (defun android-project-variants (&optional project-root refresh)
-  "Return all Android variant metadata for PROJECT-ROOT.
+  "Return available Android variant metadata for PROJECT-ROOT.
 Each entry is a plist describing one Gradle module variant.  PROJECT-ROOT
-defaults to `android-root'.  With REFRESH non-nil, refresh Gradle metadata."
+defaults to `android-root'.  Stale or missing metadata starts an asynchronous
+refresh; a last-known in-memory model remains available during the refresh.
+With REFRESH non-nil, always start a refresh."
   (when-let* ((root (android--project-root project-root)))
+    (android--selection-load root)
     (let ((default-directory root))
       (android--mark-selected-variants
        root (copy-tree (android--get-flavors refresh))))))
@@ -628,6 +965,24 @@ With REFRESH non-nil, refresh Gradle metadata."
   (when-let* ((root (android--project-root project-root))
               (entries (android-project-variants root refresh)))
     (seq-filter (lambda (entry) (plist-get entry :selected-p)) entries)))
+
+(defun android-project-application-ids (&optional project-root refresh)
+  "Return runnable application IDs for all variants in PROJECT-ROOT.
+The result contains distinct, non-empty IDs from application and dynamic
+feature modules.  Missing or stale metadata follows the asynchronous refresh
+behavior of `android-project-variants'.  With REFRESH non-nil, always start a
+refresh."
+  (delete-dups
+   (delq nil
+         (mapcar (lambda (target)
+                   (let ((application-id (plist-get target :application-id)))
+                     (and (member (plist-get target :plugin-id)
+                                  '("com.android.application"
+                                    "com.android.dynamic-feature"))
+                          (stringp application-id)
+                          (not (string-empty-p application-id))
+                          application-id)))
+                 (android-project-variants project-root refresh)))))
 
 (defun android-project-target (module &optional variant project-root refresh)
   "Return a target for MODULE under PROJECT-ROOT.
@@ -685,7 +1040,9 @@ refresh Gradle metadata."
 
 (defun android--select-module-target ()
   "Prompt for and return one selected module target."
-  (let* ((targets (android-project-targets))
+  (let* ((targets (or (android-project-targets)
+                      (user-error
+                       "Android project model is loading; retry shortly")))
          (names (mapcar (lambda (entry) (plist-get entry :module-name)) targets))
          (duplicates
           (seq-filter
@@ -731,14 +1088,16 @@ refresh Gradle metadata."
     (android--select-target-variant target)))
 
 (defun android--remember-target (root module-id variant)
-  "Remember MODULE-ID and VARIANT as the current target under ROOT."
+  "Remember and persist MODULE-ID and VARIANT as the target under ROOT."
   (setq root (android--project-root root))
+  (android--selection-load root)
   (setf (alist-get root android--selected-modules nil nil #'string=) module-id)
   (let ((selections (copy-tree
                      (cdr (assoc root android--selected-variants)))))
     (setf (alist-get module-id selections nil nil #'equal) variant)
     (setf (alist-get root android--selected-variants nil nil #'string=)
-          selections)))
+          selections))
+  (android--selection-save root))
 
 (defun android--select-target (&optional prompt)
   "Return selected (MODULE . VARIANT) for the current project.
@@ -807,26 +1166,42 @@ same meaning as in `android-current-target'."
 
 ;; --- Commands ---
 
+(defun android--log-variants (variants)
+  "Log Android project VARIANTS."
+  (if variants
+      (dolist (target variants)
+        (android--log "module=%s variant=%s selected=%s appId=%s"
+                      (plist-get target :module-id)
+                      (plist-get target :variant)
+                      (if (plist-get target :selected-p) "yes" "no")
+                      (plist-get target :application-id)))
+    (android--log "no application flavors found")))
+
 (defun android-print-flavor ()
-  "Print the project's flavors, variants and application IDs."
+  "Print cached flavors and refresh asynchronously when unavailable."
   (interactive)
   (android--log "printing flavor data")
-  (let ((variants (android-project-variants nil t)))
+  (let* ((root (android--project-root))
+         (variants (android-project-variants)))
     (if variants
-        (dolist (target variants)
-          (android--log "module=%s variant=%s selected=%s appId=%s"
-                        (plist-get target :module-id)
-                        (plist-get target :variant)
-                        (if (plist-get target :selected-p) "yes" "no")
-                        (plist-get target :application-id)))
-      (android--log "no application flavors found"))))
+        (android--log-variants variants)
+      (android-refresh-project-model
+       root
+       (lambda (data error-data)
+         (if error-data
+             (android--log "project model refresh failed: %s" error-data)
+           (android--log-variants
+            (android--mark-selected-variants root (copy-tree data)))))))))
 
 (defun android-refresh-flavors ()
-  "Force refresh the cached flavor data."
+  "Refresh project metadata asynchronously and report completion."
   (interactive)
-  (android--log "refreshing flavor cache")
-  (android--get-flavors t)
-  (android--log "refreshed %d flavors" (length android--flavor-cache)))
+  (android-refresh-project-model
+   nil
+   (lambda (data error-data)
+     (if error-data
+         (android--log "project model refresh failed: %s" error-data)
+       (android--log "refreshed %d flavors" (length data))))))
 
 (defun android-gradle (tasks-or-goals)
   "Run gradle TASKS-OR-GOALS in the project root directory."
@@ -1108,6 +1483,8 @@ With prefix argument PROMPT, select module and variant again."
 
 (when-let* ((subdir (ignore-errors (android--latest-build-tools-subdir))))
   (cl-pushnew subdir android-mode-sdk-tool-subdirs :test #'string=))
+
+(add-hook 'after-save-hook #'android--project-input-saved)
 
 (provide 'android-mode)
 
