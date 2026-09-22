@@ -103,11 +103,29 @@ allprojects { proj ->
             if (androidComponents != null) {
                 androidComponents.onVariants(androidComponents.selector().all()) { variant ->
                     def applicationId = variant.hasProperty("applicationId") ? variant.applicationId.get() : ""
+                    def buildType = variant.hasProperty("buildType") ? (variant.buildType ?: "") : ""
+                    def productFlavors = variant.hasProperty("productFlavors")
+                        ? variant.productFlavors.collect { flavor -> flavor.second }.join(",")
+                        : ""
+                    def android = proj.extensions.findByName("android")
+                    def preferredBuildType = android?.buildTypes?.findByName(buildType)
+                    def preferredBuildTypeFlag = preferredBuildType != null &&
+                        preferredBuildType.hasProperty("isDefault") &&
+                        preferredBuildType.isDefault
+                    def preferredProductFlavors = android?.productFlavors?.findAll { flavor ->
+                        flavor.hasProperty("isDefault") && flavor.isDefault
+                    }?.collect { flavor -> flavor.name }?.join(",") ?: ""
+                    def buildRoot = proj.gradle.rootProject.projectDir.absolutePath
                     flavorRecords.add([
                         project: proj,
+                        buildRoot: buildRoot,
                         pluginId: pluginId,
                         variantName: variant.name,
-                        applicationId: applicationId
+                        applicationId: applicationId,
+                        buildType: buildType,
+                        productFlavors: productFlavors,
+                        preferredBuildType: preferredBuildTypeFlag,
+                        preferredProductFlavors: preferredProductFlavors
                     ])
                 }
             }
@@ -120,7 +138,7 @@ gradle.projectsEvaluated {
     flavorRecords.each { record ->
         def proj = record.project
         def variantName = record.variantName
-        println "${proj.path}|${proj.projectDir.absolutePath}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}"
+        println "${proj.path}|${proj.projectDir.absolutePath}|${record.buildRoot}|${variantName}|${record.applicationId}|${sourceRoots(proj, variantName)}|${previewTaskName(proj, variantName, record.pluginId)}|${record.buildType}|${record.productFlavors}|${record.preferredBuildType}|${record.preferredProductFlavors}"
     }
     println "===FLAVORS_END==="
 }

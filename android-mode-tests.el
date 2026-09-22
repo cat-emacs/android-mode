@@ -8,26 +8,47 @@
 
 (require 'ert)
 (require 'android-mode)
+
+(defun android-mode-tests--target (module variant &rest properties)
+  "Return target metadata for MODULE, VARIANT, and PROPERTIES."
+  (let* ((root (format "/tmp/project/%s" module))
+         (target
+          (list :module-id (cons "/tmp/project" (concat ":" module))
+                :build-root "/tmp/project"
+                :module-path (concat ":" module)
+                :module-name module
+                :module-root root
+                :variant variant
+                :application-id (format "com.example.%s" module)
+                :source-roots '("src/main/kotlin")
+                :preview-task (format "assemble%s" (capitalize variant))
+                :build-type variant
+                :product-flavors nil
+                :preferred-build-type-p nil
+                :preferred-product-flavors nil)))
+    (while properties
+      (setq target (plist-put target (pop properties) (pop properties))))
+    target))
+
 (ert-deftest android-mode-parse-gradle-flavors ()
   "Gradle flavor output is parsed between marker lines."
   (should
    (equal
     (android-parse-gradle-flavors
-     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|debug|com.example|src/main/kotlin;src/debug/kotlin|testDebugUnitTest\n:feature|/tmp/project/feature|release|com.example.feature|src/main/kotlin|assembleRelease\n===FLAVORS_END===\nignored\n")
-    '((:module-path ":app"
+     "ignored\n===FLAVORS_START===\n:app|/tmp/project/app|/tmp/project|demoDebug|com.example|src/main/kotlin;src/demo/kotlin|testDemoDebugUnitTest|debug|demo|true|demo\n===FLAVORS_END===\nignored\n")
+    '((:module-id ("/tmp/project" . ":app")
+       :build-root "/tmp/project"
+       :module-path ":app"
        :module-name "app"
        :module-root "/tmp/project/app"
-       :variant "debug"
+       :variant "demoDebug"
        :application-id "com.example"
-       :source-roots ("src/main/kotlin" "src/debug/kotlin")
-       :preview-task "testDebugUnitTest")
-      (:module-path ":feature"
-       :module-name "feature"
-       :module-root "/tmp/project/feature"
-       :variant "release"
-       :application-id "com.example.feature"
-       :source-roots ("src/main/kotlin")
-       :preview-task "assembleRelease")))))
+       :source-roots ("src/main/kotlin" "src/demo/kotlin")
+       :preview-task "testDemoDebugUnitTest"
+       :build-type "debug"
+       :product-flavors ("demo")
+       :preferred-build-type-p t
+       :preferred-product-flavors ("demo"))))))
 
 (ert-deftest android-mode-flavor-helpers-use-cache ()
   "Flavor helper functions read module, variant and applicationId from cache."
@@ -41,46 +62,72 @@
       (should (equal (android--flavor-appid "app" "release")
                      "com.example.release")))))
 
-(ert-deftest android-mode-public-target-api-resolves-source-and-selection ()
-  "Public target APIs expose source and remembered project metadata."
+(ert-deftest android-mode-public-target-api-mirrors-selected-variants ()
+  "Public targets expose one selected variant per Android module."
   (let* ((root "/tmp/project/")
-         (app (list :module-path ":app" :module-name "app"
-                    :module-root "/tmp/project/app" :variant "debug"
-                    :application-id "com.example" :source-roots '("src/main")))
-         (feature (list :module-path ":feature" :module-name "feature"
-                        :module-root "/tmp/project/feature" :variant "release"
-                        :application-id "com.feature" :source-roots '("src/main")))
-         (android--selected-targets nil))
-    (cl-letf (((symbol-function 'android-project-targets)
-               (lambda (&optional _root _refresh) (list app feature))))
-      (should (equal (android-target-for-source-file
-                      "/tmp/project/feature/src/main/Foo.kt" root)
-                     feature))
-      (setf (alist-get root android--selected-targets nil nil #'string=)
-            '("app" . "debug"))
-      (should (equal (android-current-target nil nil root) app))
-      (should (equal (android-current-application-id nil nil root)
-                     "com.example")))))
+         (app-debug (android-mode-tests--target "app" "debug"))
+         (app-release (android-mode-tests--target "app" "release"))
+         (feature (android-mode-tests--target "feature" "release"))
+         (android--selected-modules nil)
+         (android--selected-variants nil))
+    (cl-letf (((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh)
+                 (list app-release app-debug feature))))
+      (let ((targets (android-project-targets root)))
+        (should (= (length targets) 2))
+        (should (equal (mapcar (lambda (entry)
+                                (cons (plist-get entry :module-name)
+                                      (plist-get entry :variant)))
+                              targets)
+                       '(("app" . "debug") ("feature" . "release"))))
+        (should (seq-every-p (lambda (entry)
+                               (plist-get entry :selected-p))
+                             targets)))
+      (android--remember-target root (plist-get app-debug :module-id) "release")
+      (should (equal (plist-get
+                      (android-target-for-source-file
+                       "/tmp/project/app/src/main/kotlin/Foo.kt" root)
+                      :variant)
+                     "release"))
+      (should-not (plist-get (android-project-target "app" "debug" root)
+                             :selected-p))
+      (should (plist-get (android-project-target "app" nil root)
+                         :selected-p)))))
 
-(ert-deftest android-mode-current-application-id-handles-ambiguity ()
-  "Application ID resolution accepts one ID and rejects ambiguous IDs."
-  (let ((android--selected-targets nil))
-    (cl-letf (((symbol-function 'android-root) (lambda () "/tmp/project/"))
-              ((symbol-function 'android-project-targets)
-               (lambda (&optional _root _refresh)
-                 (list (list :module-name "app" :variant "debug"
-                             :application-id "com.example")
-                       (list :module-name "app" :variant "release"
-                             :application-id "com.example")))))
-      (should (equal (android-current-application-id) "com.example")))
-    (cl-letf (((symbol-function 'android-root) (lambda () "/tmp/project/"))
-              ((symbol-function 'android-project-targets)
-               (lambda (&optional _root _refresh)
-                 (list (list :module-name "app" :variant "debug"
-                             :application-id "com.debug")
-                       (list :module-name "app" :variant "release"
-                             :application-id "com.release")))))
-      (should-not (android-current-application-id)))))
+(ert-deftest android-mode-current-target-follows-file-module ()
+  "Current target resolves a file's module before its selected variant."
+  (let* ((root "/tmp/project/")
+         (app (android-mode-tests--target "app" "debug"
+                                         :application-id "com.example.app"))
+         (feature (android-mode-tests--target
+                   "feature" "release" :application-id "com.example.feature"))
+         (android--selected-modules
+          (list (cons root (plist-get app :module-id))))
+         (android--selected-variants nil))
+    (cl-letf (((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh) (list app feature))))
+      (should (equal
+               (plist-get
+                (android-current-target
+                 nil "/tmp/project/feature/src/main/kotlin/Foo.kt" root)
+                :module-name)
+               "feature"))
+      (should (equal
+               (android-current-application-id
+                nil "/tmp/project/feature/src/main/kotlin/Foo.kt" root)
+               "com.example.feature")))))
+
+(ert-deftest android-mode-current-application-id-requires-current-module ()
+  "Application ID resolution does not guess across multiple modules."
+  (let ((android--selected-modules nil)
+        (android--selected-variants nil))
+    (cl-letf (((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh)
+                 (list (android-mode-tests--target "app" "debug"
+                                                   :application-id "com.example")
+                       (android-mode-tests--target "feature" "debug"
+                                                   :application-id "com.example")))))
+      (should-not (android-current-application-id nil nil "/tmp/project/")))))
 
 (ert-deftest android-mode-project-targets-forwards-refresh ()
   "Public project metadata forwards its root and refresh request."
@@ -88,14 +135,62 @@
     (cl-letf (((symbol-function 'android--get-flavors)
                (lambda (&optional refresh)
                  (setq seen-root default-directory seen-refresh refresh)
-                 (list (list :module-name "app" :variant "debug")))))
+                 (list (android-mode-tests--target "app" "debug")))))
       (should (android-project-targets "/tmp/project" t))
       (should (equal seen-root "/tmp/project/"))
       (should seen-refresh))))
 
+(ert-deftest android-mode-default-variant-matches-studio-ordering ()
+  "Default variants follow Studio preferences and common flavor dimensions."
+  (let ((release (android-mode-tests--target "app" "release"))
+        (debug (android-mode-tests--target "app" "debug"))
+        (demo (android-mode-tests--target
+               "app" "demoRelease" :build-type "release"
+               :product-flavors '("demo")
+               :preferred-product-flavors '("demo")))
+        (production-debug (android-mode-tests--target
+                           "app" "productionDebug" :build-type "debug"
+                           :product-flavors '("production")
+                           :preferred-product-flavors '("demo")))
+        (longer (android-mode-tests--target
+                 "app" "demoZetaRelease" :build-type "release"
+                 :product-flavors '("demo" "zeta")))
+        (shorter (android-mode-tests--target
+                  "app" "demoRelease" :build-type "release"
+                  :product-flavors '("demo"))))
+    (should (eq (android--default-module-target (list release debug)) debug))
+    ;; With no dimension shared by every candidate, Studio skips flavors.
+    (should (eq (android--default-module-target (list debug demo)) debug))
+    (should (eq (android--default-module-target
+                 (list production-debug demo))
+                demo))
+    ;; Studio compares only the number of flavor dimensions shared by all
+    ;; candidates, so these tie and retain the first model entry.
+    (should (eq (android--default-module-target (list longer shorter))
+                longer))))
+
+(ert-deftest android-mode-project-target-rejects-ambiguous-module-path ()
+  "String module paths do not cross composite-build identities."
+  (let* ((first (android-mode-tests--target "app" "debug"))
+         (second (copy-tree first))
+         (android--selected-modules nil)
+         (android--selected-variants nil))
+    (plist-put second :module-id '("/tmp/included" . ":app"))
+    (plist-put second :build-root "/tmp/included")
+    (cl-letf (((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh) (list first second))))
+      (should-not (android-project-target ":app" nil "/tmp/project/"))
+      (should (equal
+               (plist-get
+                (android-project-target
+                 '("/tmp/included" . ":app") nil "/tmp/project/")
+                :build-root)
+               "/tmp/included")))))
+
 (ert-deftest android-mode-public-target-api-ignores-non-project-files ()
   "Public target APIs return nil outside an Android project."
-  (let ((android--selected-targets nil))
+  (let ((android--selected-modules nil)
+        (android--selected-variants nil))
     (cl-letf (((symbol-function 'android-root)
                (lambda () (error "No Android project"))))
       (should-not (android-project-targets))
@@ -163,18 +258,17 @@
 
 (ert-deftest android-mode-gradle-install-reuses-current-project-selection ()
   "Install reuses a previous module and variant selection for the project."
-  (let ((android--selected-targets nil)
+  (let ((android--selected-modules nil)
+        (android--selected-variants nil)
         (answers '("app" "debug"))
+        (variants (list (android-mode-tests--target "app" "debug")
+                        (android-mode-tests--target "app" "release")
+                        (android-mode-tests--target "demo" "staging")))
         gradle-tasks)
     (cl-letf (((symbol-function 'android-root)
                (lambda () "/tmp/project/"))
-              ((symbol-function 'android--flavor-modules)
-               (lambda () '("app" "demo")))
-              ((symbol-function 'android--flavor-variants)
-               (lambda (module)
-                 (if (string= module "app")
-                     '("debug" "release")
-                   '("staging"))))
+              ((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh) variants))
               ((symbol-function 'completing-read)
                (lambda (_prompt _collection &rest _args)
                  (pop answers)))
@@ -189,18 +283,18 @@
 
 (ert-deftest android-mode-gradle-install-prefix-prompts-again ()
   "A prefix argument forces module and variant prompting again."
-  (let ((android--selected-targets nil)
+  (let ((android--selected-modules nil)
+        (android--selected-variants nil)
         (answers '("app" "debug" "demo" "staging"))
+        (variants (list (android-mode-tests--target "app" "debug")
+                        (android-mode-tests--target "app" "release")
+                        (android-mode-tests--target "demo" "staging")
+                        (android-mode-tests--target "demo" "qa")))
         gradle-tasks)
     (cl-letf (((symbol-function 'android-root)
                (lambda () "/tmp/project/"))
-              ((symbol-function 'android--flavor-modules)
-               (lambda () '("app" "demo")))
-              ((symbol-function 'android--flavor-variants)
-               (lambda (module)
-                 (if (string= module "app")
-                     '("debug" "release")
-                   '("staging" "qa"))))
+              ((symbol-function 'android--get-flavors)
+               (lambda (&optional _refresh) variants))
               ((symbol-function 'completing-read)
                (lambda (_prompt _collection &rest _args)
                  (pop answers)))

@@ -78,14 +78,25 @@ pass options that are not exposed in the menu:
 
 Multiple sessions may run concurrently when they target different devices.
 
-`android-mode` also exposes project metadata for integrations:
+`android-mode` exposes an Android Studio-aligned project model for integrations:
 
-- `android-project-targets` returns module, variant, application ID, source-root,
-  and preview-task metadata;
-- `android-project-target` resolves one module and variant;
-- `android-target-for-source-file` resolves the target owning a source file;
-- `android-current-target` and `android-current-application-id` reuse the
-  selected target or infer it from the current source file.
+- `android-project-variants` returns every available Gradle variant;
+- `android-project-targets` returns one selected target per Android module;
+- `android-project-target` returns a module's selected target, or an exact
+  variant when one is supplied;
+- `android-target-for-source-file` resolves a file to its module and then that
+  module's selected variant;
+- `android-current-target` uses the source module, the last selected module, or
+  the sole Android module;
+- `android-current-application-id` reads only the current selected target's
+  application ID.
+
+Target metadata includes a composite-build-safe `:module-id`, `:build-root`,
+Gradle module path, module root, variant, application ID, source roots, preview
+task, build type, product flavors, and `:selected-p`. The default selected
+variant follows Android Studio's ordering: DSL-default build types and flavors,
+then `debug`, then flavor and build-type names. A user selection remains the
+selected variant for that module while it is still available.
 
 These public functions let Logcat and Compose Preview integrations avoid
 relying on `android-mode` internals.

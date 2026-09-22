@@ -75,9 +75,12 @@ available."
 (defvar android-mode-gradle-log-buffer-name "*android-gradle-log*"
   "Buffer name used for synchronous android-mode Gradle output.")
 
-(defvar android--selected-targets nil
-  "Alist of selected Android targets keyed by project root.
-Each value is a cons cell of (MODULE . VARIANT).")
+(defvar android--selected-modules nil
+  "Alist of current Android module IDs keyed by project root.")
+
+(defvar android--selected-variants nil
+  "Alist of per-module selected variants keyed by project root.
+Each value is an alist whose keys are module IDs and values are variants.")
 
 (defun android--log (format-string &rest args)
   "Log android-mode message FORMAT-STRING with ARGS."
@@ -295,14 +298,15 @@ Uses aapt2 to find the launchable activity from the built APK."
   :type 'string
   :group 'android)
 
-(defconst android--flavor-cache-version 3
+(defconst android--flavor-cache-version 4
   "Flavor cache schema version.")
 
 (defvar android--flavor-cache nil
   "Cached flavor data as plist entries.
-Each entry contains :module-path, :module-name, :module-root, :variant,
-:application-id, :source-roots, and :preview-task.
-Per-project, keyed by project root.")
+Each entry contains :module-id, :build-root, :module-path, :module-name,
+:module-root, :variant, :application-id, :source-roots, :preview-task,
+:build-type, :product-flavors, :preferred-build-type-p, and
+:preferred-product-flavors.  Per-project, keyed by project root.")
 
 (defvar android--flavor-cache-root nil
   "Project root for which `android--flavor-cache' is valid.")
@@ -330,11 +334,17 @@ Per-project, keyed by project root.")
        (seq-every-p
         (lambda (entry)
           (and (keywordp (car-safe entry))
+               (plist-get entry :module-id)
+               (plist-get entry :build-root)
                (plist-get entry :module-path)
                (plist-get entry :module-root)
                (plist-get entry :variant)
                (plist-member entry :source-roots)
-               (plist-member entry :preview-task)))
+               (plist-member entry :preview-task)
+               (plist-member entry :build-type)
+               (plist-member entry :product-flavors)
+               (plist-member entry :preferred-build-type-p)
+               (plist-member entry :preferred-product-flavors)))
         data)))
 
 (defun android--flavor-cache-load (root)
@@ -411,16 +421,28 @@ Only considers lines between ===FLAVORS_START=== and ===FLAVORS_END===."
        ((string-match-p "===FLAVORS_END===" line)
         (setq in-flavors nil))
        (in-flavors
-        (pcase-let ((`(,module-path ,module-root ,variant ,appid ,source-roots ,preview-task)
-                     (split-string line "|" nil)))
+        (pcase-let ((`(,module-path ,module-root ,build-root ,variant ,appid
+                         ,source-roots ,preview-task ,build-type
+                         ,product-flavors ,preferred-build-type
+                         ,preferred-product-flavors)
+                       (split-string line "|" nil)))
           (when (and module-path module-root variant)
-            (push (list :module-path module-path
+            (push (list :module-id (cons build-root module-path)
+                        :build-root build-root
+                        :module-path module-path
                         :module-name (string-remove-prefix ":" module-path)
                         :module-root module-root
                         :variant variant
                         :application-id (or appid "")
                         :source-roots (split-string (or source-roots "") ";" t)
-                        :preview-task (or preview-task ""))
+                        :preview-task (or preview-task "")
+                        :build-type (or build-type "")
+                        :product-flavors
+                        (split-string (or product-flavors "") "," t)
+                        :preferred-build-type-p
+                        (equal preferred-build-type "true")
+                        :preferred-product-flavors
+                        (split-string (or preferred-product-flavors "") "," t))
                   result))))))
     (nreverse result)))
 
@@ -506,129 +528,277 @@ ENTRIES defaults to `android--get-flavors'."
     (let ((default-directory (file-name-directory (expand-file-name file))))
       (android-root))))
 
-(defun android-project-targets (&optional project-root refresh)
-  "Return Android target metadata for PROJECT-ROOT.
-Each target is a plist containing :module-path, :module-name, :module-root,
-:variant, :application-id, :source-roots, and :preview-task.  PROJECT-ROOT
-defaults to `android-root'.  With REFRESH non-nil, refresh Gradle metadata."
-  (when-let* ((root (or project-root (ignore-errors (android-root)))))
-    (let ((default-directory (file-name-as-directory
-                              (expand-file-name root))))
-      (copy-tree (android--get-flavors refresh)))))
+(defun android--variant-sort-key (entry flavor-dimensions)
+  "Return Studio-compatible key for ENTRY over FLAVOR-DIMENSIONS."
+  (let* ((preferred-flavors (plist-get entry :preferred-product-flavors))
+         (flavors (cl-subseq (plist-get entry :product-flavors)
+                             0 flavor-dimensions)))
+    (append
+     (list (if (plist-get entry :preferred-build-type-p) 0 1))
+     (mapcar (lambda (flavor)
+               (if (member flavor preferred-flavors) 0 1))
+             flavors)
+     (list (if (equal (plist-get entry :build-type) "debug") 0 1))
+     flavors
+     (list (plist-get entry :build-type)))))
 
-(defun android-project-target (module variant &optional project-root refresh)
-  "Return target for MODULE and VARIANT under PROJECT-ROOT.
-MODULE accepts either a module name or Gradle module path.  With REFRESH
-non-nil, refresh Gradle metadata before resolving the target."
-  (let ((module-name (string-remove-prefix ":" module)))
-    (seq-find
+(defun android--variant-key-less-p (left right)
+  "Return non-nil when variant key LEFT sorts before RIGHT."
+  (catch 'result
+    (while left
+      (let ((left-value (pop left))
+            (right-value (pop right)))
+        (unless (equal left-value right-value)
+          (throw 'result
+                 (if (numberp left-value)
+                     (< left-value right-value)
+                   (string< left-value right-value))))))
+    nil))
+
+(defun android--default-module-target (entries)
+  "Return Android Studio-compatible default target from ENTRIES."
+  (when entries
+    (let* ((flavor-dimensions
+            (apply #'min
+                   (mapcar (lambda (entry)
+                             (length (plist-get entry :product-flavors)))
+                           entries)))
+           (best (car entries))
+           (best-key (android--variant-sort-key best flavor-dimensions)))
+      (dolist (entry (cdr entries))
+        (let ((key (android--variant-sort-key entry flavor-dimensions)))
+          (when (android--variant-key-less-p key best-key)
+            (setq best entry
+                  best-key key))))
+      best)))
+
+(defun android--project-root (&optional project-root)
+  "Return normalized PROJECT-ROOT or the current Android project root."
+  (when-let* ((root (or project-root (ignore-errors (android-root)))))
+    (file-name-as-directory (expand-file-name root))))
+
+(defun android-project-variants (&optional project-root refresh)
+  "Return all Android variant metadata for PROJECT-ROOT.
+Each entry is a plist describing one Gradle module variant.  PROJECT-ROOT
+defaults to `android-root'.  With REFRESH non-nil, refresh Gradle metadata."
+  (when-let* ((root (android--project-root project-root)))
+    (let ((default-directory root))
+      (android--mark-selected-variants
+       root (copy-tree (android--get-flavors refresh))))))
+
+(defun android--module-key (entry)
+  "Return stable module identity for target ENTRY."
+  (or (plist-get entry :module-id)
+      (plist-get entry :module-name)))
+
+(defun android--selected-module-variant (root module entries)
+  "Return selected variant under ROOT for MODULE from ENTRIES.
+MODULE is a stable module identity as returned by `android--module-key'."
+  (let* ((module-selections (cdr (assoc root android--selected-variants)))
+         (remembered (cdr (assoc module module-selections)))
+         (variants (seq-filter
+                    (lambda (entry)
+                      (equal (android--module-key entry) module))
+                    entries)))
+    (or (and remembered
+             (seq-find (lambda (entry)
+                         (string= (plist-get entry :variant) remembered))
+                       variants))
+        (android--default-module-target variants))))
+
+(defun android--mark-selected-variants (root entries)
+  "Return copies of ENTRIES marked with selected state under ROOT."
+  (let ((selected
+         (mapcar
+          (lambda (module)
+            (android--selected-module-variant root module entries))
+          (delete-dups (mapcar #'android--module-key entries)))))
+    (mapcar
      (lambda (entry)
-       (and (string= (plist-get entry :module-name) module-name)
-            (string= (plist-get entry :variant) variant)))
-     (android-project-targets project-root refresh))))
+       (let ((copy (copy-tree entry)))
+         (plist-put copy :selected-p
+                    (and (memq entry selected) t))))
+     entries)))
+
+(defun android-project-targets (&optional project-root refresh)
+  "Return the selected Android target for each module in PROJECT-ROOT.
+This mirrors Android Studio's display modules and each module's selected
+variant.  Use `android-project-variants' to inspect every available variant.
+With REFRESH non-nil, refresh Gradle metadata."
+  (when-let* ((root (android--project-root project-root))
+              (entries (android-project-variants root refresh)))
+    (seq-filter (lambda (entry) (plist-get entry :selected-p)) entries)))
+
+(defun android-project-target (module &optional variant project-root refresh)
+  "Return a target for MODULE under PROJECT-ROOT.
+MODULE accepts a module ID, name, or Gradle path.  Without VARIANT, return the
+module's selected target.  With VARIANT, return that exact candidate and mark
+whether it is selected.  Ambiguous string module names return nil.  With
+REFRESH non-nil, refresh Gradle metadata."
+  (let* ((entries (android-project-variants project-root refresh))
+         (matches
+          (if (consp module)
+              (seq-filter
+               (lambda (entry)
+                 (equal (plist-get entry :module-id) module))
+               entries)
+            (let ((name (string-remove-prefix ":" module)))
+              (seq-filter
+               (lambda (entry)
+                 (or (string= (plist-get entry :module-name) name)
+                     (string= (plist-get entry :module-path) module)))
+               entries))))
+         (module-ids (delete-dups (mapcar #'android--module-key matches))))
+    (when (= (length module-ids) 1)
+      (if variant
+          (seq-find (lambda (entry)
+                      (string= (plist-get entry :variant) variant))
+                    matches)
+        (seq-find (lambda (entry) (plist-get entry :selected-p)) matches)))))
 
 (defun android-target-for-source-file (file &optional project-root refresh)
-  "Return the Android target owning FILE under PROJECT-ROOT.
-PROJECT-ROOT defaults to the Android root containing FILE.  With REFRESH
-non-nil, refresh Gradle metadata before resolving the target."
+  "Return the selected Android target owning FILE under PROJECT-ROOT.
+The file first resolves to a Gradle module, then to that module's selected
+variant, matching Android Studio's build-target lookup.  With REFRESH non-nil,
+refresh Gradle metadata."
   (let* ((file (expand-file-name file))
-         (root (or project-root (android--root-for-file file))))
-    (when root
-      (android--target-for-source-file
-       file root (android-project-targets root refresh)))))
+         (root (android--project-root
+                (or project-root (android--root-for-file file))))
+         (entries (and root (android-project-variants root refresh)))
+         (owner (and entries
+                     (android--target-for-source-file file root entries))))
+    (when owner
+      (let ((target
+             (copy-tree
+              (android--selected-module-variant
+               root (android--module-key owner) entries))))
+        (plist-put target :selected-p t)))))
 
 ;; --- Interactive selection ---
 
+(defun android--module-display-name (target duplicates)
+  "Return display name for TARGET, disambiguated by DUPLICATES."
+  (let ((name (plist-get target :module-name)))
+    (if (member name duplicates)
+        (format "%s  [%s]" name (plist-get target :build-root))
+      name)))
+
+(defun android--select-module-target ()
+  "Prompt for and return one selected module target."
+  (let* ((targets (android-project-targets))
+         (names (mapcar (lambda (entry) (plist-get entry :module-name)) targets))
+         (duplicates
+          (seq-filter
+           (lambda (name) (> (seq-count (lambda (item) (string= item name)) names) 1))
+           (delete-dups (copy-sequence names))))
+         (choices
+          (mapcar (lambda (target)
+                    (cons (android--module-display-name target duplicates) target))
+                  targets))
+         (choice (if (= (length choices) 1)
+                     (caar choices)
+                   (completing-read "Module: " choices nil t))))
+    (cdr (assoc choice choices))))
+
 (defun android--select-module ()
-  "Prompt user to select a module and return the module name string."
-  (let ((modules (android--flavor-modules)))
-    (let ((module (if (= (length modules) 1)
-                      (car modules)
-                    (completing-read "Module: " modules nil t))))
-      (android--log "selected module %s" module)
-      module)))
+  "Prompt user to select a module and return its module name string."
+  (let* ((target (android--select-module-target))
+         (module (plist-get target :module-name)))
+    (android--log "selected module %s" module)
+    module))
+
+(defun android--select-target-variant (target)
+  "Prompt for a variant of module TARGET and return its name."
+  (let* ((module-id (android--module-key target))
+         (module (plist-get target :module-name))
+         (variants
+          (mapcar
+           (lambda (entry) (plist-get entry :variant))
+           (seq-filter
+            (lambda (entry)
+              (equal (android--module-key entry) module-id))
+            (android-project-variants))))
+         (variant (if (= (length variants) 1)
+                      (car variants)
+                    (completing-read (format "Variant (%s): " module)
+                                     variants nil t))))
+    (android--log "selected variant %s for module %s" variant module)
+    variant))
 
 (defun android--select-variant (module)
-  "Prompt user to select a variant for MODULE and return its name."
-  (let ((variants (android--flavor-variants module)))
-    (let ((variant (if (= (length variants) 1)
-                       (car variants)
-                     (completing-read (format "Variant (%s): " module) variants nil t))))
-      (android--log "selected variant %s for module %s" variant module)
-      variant)))
+  "Prompt for a variant of uniquely named MODULE and return its name."
+  (when-let* ((target (android-project-target module)))
+    (android--select-target-variant target)))
+
+(defun android--remember-target (root module-id variant)
+  "Remember MODULE-ID and VARIANT as the current target under ROOT."
+  (setq root (android--project-root root))
+  (setf (alist-get root android--selected-modules nil nil #'string=) module-id)
+  (let ((selections (copy-tree
+                     (cdr (assoc root android--selected-variants)))))
+    (setf (alist-get module-id selections nil nil #'equal) variant)
+    (setf (alist-get root android--selected-variants nil nil #'string=)
+          selections)))
 
 (defun android--select-target (&optional prompt)
   "Return selected (MODULE . VARIANT) for the current project.
-Reuse the current project selection unless PROMPT is non-nil."
-  (let* ((root (android-root))
-         (current (and root (assoc root android--selected-targets))))
+Reuse the current module's selected variant unless PROMPT is non-nil."
+  (let* ((root (android--project-root))
+         (targets (android-project-targets root))
+         (current-module (cdr (assoc root android--selected-modules)))
+         (current (and current-module
+                       (seq-find
+                        (lambda (entry)
+                          (equal (android--module-key entry) current-module))
+                        targets))))
     (if (and current (not prompt))
-        (cdr current)
-      (let* ((module (android--select-module))
-             (variant (android--select-variant module))
-             (target (cons module variant)))
-        (when root
-          (setf (alist-get root android--selected-targets nil nil #'string=)
-                target))
-        target))))
+        (cons (plist-get current :module-name)
+              (plist-get current :variant))
+      (let* ((target (android--select-module-target))
+             (module (plist-get target :module-name))
+             (module-id (android--module-key target))
+             (variant (android--select-target-variant target)))
+        (android--log "selected module %s" module)
+        (android--remember-target root module-id variant)
+        (cons module variant)))))
 
 (defun android-current-target (&optional prompt file project-root)
-  "Return the current Android target metadata.
-When PROMPT is non-nil, prompt for a module and variant and remember that
-selection for PROJECT-ROOT.  Otherwise prefer a remembered selection, then
-the target owning FILE, then the sole available target.  FILE defaults to
-the value of the variable `buffer-file-name', and PROJECT-ROOT defaults to
-`android-root'."
+  "Return the current selected Android target metadata.
+When PROMPT is non-nil, prompt for a module and variant and remember both.
+Otherwise resolve FILE to its module and selected variant, then use the last
+selected module, then the sole Android module.  FILE defaults to the variable
+`buffer-file-name', and PROJECT-ROOT defaults to `android-root'."
   (let* ((file (or file buffer-file-name))
-         (root (when-let* ((root
-                            (or project-root
-                                (if file
-                                    (android--root-for-file file)
-                                  (ignore-errors (android-root))))))
-                 (file-name-as-directory (expand-file-name root))))
-         (selected (and root (cdr (assoc root android--selected-targets))))
-         (targets (and root (android-project-targets root)))
-         (selected-target
-          (and selected
-               (seq-find
-                (lambda (entry)
-                  (and (string= (plist-get entry :module-name)
-                                (string-remove-prefix ":" (car selected)))
-                       (string= (plist-get entry :variant) (cdr selected))))
-                targets))))
-    (if prompt
-        (when root
+         (root (android--project-root
+                (or project-root
+                    (if file
+                        (android--root-for-file file)
+                      (ignore-errors (android-root)))))))
+    (when root
+      (if prompt
           (let ((default-directory root))
-            (when-let* ((selection (android--select-target t)))
-              (android-project-target (car selection) (cdr selection) root))))
-      (or selected-target
-          (and root file
-               (android--target-for-source-file file root targets))
-          (and (= (length targets) 1) (car targets))))))
+            (pcase-let ((`(,_module . ,variant) (android--select-target t)))
+              (when-let* ((module-id
+                           (cdr (assoc root android--selected-modules))))
+                (android-project-target module-id variant root))))
+        (or (and file (android-target-for-source-file file root))
+            (when-let* ((module-id (cdr (assoc root android--selected-modules))))
+              (seq-find
+               (lambda (entry)
+                 (equal (android--module-key entry) module-id))
+               (android-project-targets root)))
+            (let ((targets (android-project-targets root)))
+              (and (= (length targets) 1) (car targets))))))))
 
 (defun android-current-application-id (&optional prompt file project-root)
-  "Return the current Android application ID, or nil when ambiguous.
-PROMPT, FILE, and PROJECT-ROOT have the same meaning as in
-`android-current-target'."
-  (let* ((file (or file buffer-file-name))
-         (root (or project-root
-                   (if file
-                       (android--root-for-file file)
-                     (ignore-errors (android-root)))))
-         (target (and root (android-current-target prompt file root)))
-         (target-id (plist-get target :application-id))
-         (ids (when (and root
-                         (or (null target-id) (string-empty-p target-id)))
-                (delete-dups
-                 (delq nil
-                       (mapcar
-                        (lambda (entry)
-                          (let ((id (plist-get entry :application-id)))
-                            (and id (not (string-empty-p id)) id)))
-                        (android-project-targets root)))))))
-    (cond
-     ((and target-id (not (string-empty-p target-id))) target-id)
-     ((= (length ids) 1) (car ids)))))
+  "Return the current selected Android target's application ID.
+Return nil when there is no unambiguous current target or its project model
+does not expose an application ID.  PROMPT, FILE, and PROJECT-ROOT have the
+same meaning as in `android-current-target'."
+  (when-let* ((target (android-current-target prompt file project-root))
+              (application-id (plist-get target :application-id))
+              ((not (string-empty-p application-id))))
+    application-id))
 
 (defun android--capitalize (s)
   "Capitalize first letter of S."
@@ -641,11 +811,14 @@ PROMPT, FILE, and PROJECT-ROOT have the same meaning as in
   "Print the project's flavors, variants and application IDs."
   (interactive)
   (android--log "printing flavor data")
-  (let ((flavors (android--get-flavors t)))
-    (if flavors
-        (dolist (f flavors)
-          (android--log "module=%s variant=%s appId=%s"
-                        (nth 0 f) (nth 1 f) (nth 2 f)))
+  (let ((variants (android-project-variants nil t)))
+    (if variants
+        (dolist (target variants)
+          (android--log "module=%s variant=%s selected=%s appId=%s"
+                        (plist-get target :module-id)
+                        (plist-get target :variant)
+                        (if (plist-get target :selected-p) "yes" "no")
+                        (plist-get target :application-id)))
       (android--log "no application flavors found"))))
 
 (defun android-refresh-flavors ()
