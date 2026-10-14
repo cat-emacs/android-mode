@@ -380,7 +380,7 @@ Interactively, prompt for an image that is not installed."
                "-avd" avd "-wipe-data")
         (android--log "emulator for %s is already running or being started" avd)))))
 
-;;;###autoload
+;;;###autoload (autoload 'android-avd "android-mode-avd" nil t)
 (transient-define-prefix android-avd ()
   "Create and manage Android Virtual Devices."
   ["AVD"

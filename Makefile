@@ -1,6 +1,9 @@
 EMACS ?= emacs
 BATCH = $(EMACS) --batch --quick
-LOAD_PATH = -L .
+TEST_DEPS_DIR ?= .test-deps
+ANDROID_PROJECT_DIR ?= $(abspath $(TEST_DEPS_DIR)/android-project)
+ANDROID_ADB_DIR ?= $(abspath $(TEST_DEPS_DIR)/android-adb)
+LOAD_PATH = -L . -L "$(ANDROID_PROJECT_DIR)" -L "$(ANDROID_ADB_DIR)"
 
 ARCHIVES = --eval "(require 'package)" \
            --eval "(add-to-list 'package-archives '(\"melpa\" . \"https://melpa.org/packages/\") t)" \
@@ -20,6 +23,9 @@ install-deps:
 	$(BATCH) $(ARCHIVES) \
 	  --eval "(package-refresh-contents)" \
 	  --eval "(package-install 'package-lint)"
+	mkdir -p "$(TEST_DEPS_DIR)"
+	test -d "$(ANDROID_PROJECT_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/android-project "$(ANDROID_PROJECT_DIR)"
+	test -d "$(ANDROID_ADB_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/android-adb "$(ANDROID_ADB_DIR)"
 
 lint:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
@@ -28,24 +34,20 @@ lint:
 	  android-mode.el
 	$(BATCH) $(LOAD_PATH) \
 	  --eval "(checkdoc-file \"android-mode.el\")" \
-	  --eval "(checkdoc-file \"android-mode-avd.el\")" \
-	  --eval "(checkdoc-file \"android-mode-scrcpy.el\")"
+	  --eval "(checkdoc-file \"android-mode-avd.el\")"
 
 build:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
 	  --eval "(setq byte-compile-error-on-warn t)" \
 	  --eval "(byte-compile-file \"android-mode.el\")" \
-	  --eval "(byte-compile-file \"android-mode-avd.el\")" \
-	  --eval "(byte-compile-file \"android-mode-scrcpy.el\")"
+	  --eval "(byte-compile-file \"android-mode-avd.el\")"
 
 test:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
 	  -l android-mode.el \
 	  -l android-mode-avd.el \
-	  -l android-mode-scrcpy.el \
 	  -l android-mode-tests.el \
 	  -l android-mode-avd-tests.el \
-	  -l android-mode-scrcpy-tests.el \
 	  --eval "(ert-run-tests-batch-and-exit)"
 
 clean:

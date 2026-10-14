@@ -1,6 +1,9 @@
 # android-mode
 
-Android project helpers for Emacs.
+Android project workflow commands for Emacs. Shared metadata lives in
+[android-project](https://github.com/cat-emacs/android-project), device
+communication in [android-adb](https://github.com/cat-emacs/android-adb), and
+screen mirroring in [android-scrcpy](https://github.com/cat-emacs/android-scrcpy).
 
 `android-mode` provides commands for common Android development tasks:
 
@@ -16,14 +19,24 @@ Android project helpers for Emacs.
 With `use-package` and `package-vc`:
 
 ```elisp
+(use-package android-adb
+  :vc (:url "https://github.com/cat-emacs/android-adb"))
+(use-package android-project
+  :vc (:url "https://github.com/cat-emacs/android-project"))
 (use-package android-mode
   :vc (:url "https://github.com/cat-emacs/android-mode")
-  :commands #'android-root)
+  :commands android-mode)
+;; Optional screen mirroring:
+(use-package android-scrcpy
+  :vc (:url "https://github.com/cat-emacs/android-scrcpy")
+  :commands android-scrcpy)
 ```
 
 From a local checkout:
 
 ```elisp
+(add-to-list 'load-path "/path/to/android-adb")
+(add-to-list 'load-path "/path/to/android-project")
 (add-to-list 'load-path "/path/to/android-mode")
 (require 'android-mode)
 ```
@@ -62,7 +75,7 @@ AVD support lives in `android-mode-avd.el` and is loaded on demand, while
 `android-mode.el` remains focused on project, Gradle, application, and device
 workflows.
 
-`android-scrcpy` opens a Transient menu for selecting a device and configuring
+The optional standalone `android-scrcpy` package opens a Transient menu for selecting a device and configuring
 video, window, control, input, audio, and recording options. Press `RET` to
 start scrcpy. The same menu can stop or restart sessions, show their process
 output, copy the generated shell command, and inspect displays, encoders, and
@@ -78,7 +91,7 @@ pass options that are not exposed in the menu:
 
 Multiple sessions may run concurrently when they target different devices.
 
-`android-mode` exposes an Android Studio-aligned project model for integrations:
+`android-project` exposes the shared Android Studio-aligned project model:
 
 - `android-project-variants` returns every available Gradle variant;
 - `android-project-targets` returns one selected target per Android module;
@@ -128,12 +141,16 @@ relying on `android-mode` internals.
 ## Configuration
 
 ```elisp
-(setq android-mode-cache-dir (expand-file-name "android/" user-emacs-directory)
+(setq android-project-cache-directory (expand-file-name "android/" user-emacs-directory)
       android-mode-sdk-dir "/path/to/android-sdk")
 ```
 
 `ANDROID_HOME` and a project `local.properties` `sdk.dir` value take precedence
 over `android-mode-sdk-dir`.
+
+The old `android-mode-cache-dir` remains a compatibility alias. Device commands
+resolve adb through `android-adb-program`, exec-path, or SDK fallback, separately
+from SDK tools used by AVD and APK inspection.
 
 Gradle project-model discovery runs asynchronously. Build, install, uninstall,
 test, clean, and run tasks use Emacs compilation buffers.
