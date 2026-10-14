@@ -30,8 +30,8 @@ install-deps:
 	test -d "$(ANDROID_ADB_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/android-adb "$(ANDROID_ADB_DIR)"
 	$(BATCH) $(ARCHIVES) \
 	  --eval "(require 'package-vc)" \
-	  --eval "(unless (package-installed-p 'android-project) (package-vc-install-from-checkout \"$(ANDROID_PROJECT_DIR)\"))" \
-	  --eval "(unless (package-installed-p 'android-adb) (package-vc-install-from-checkout \"$(ANDROID_ADB_DIR)\"))"
+	  --eval "(unless (package-installed-p 'android-project) (package-vc-install-from-checkout \"$(ANDROID_PROJECT_DIR)\" \"android-project\"))" \
+	  --eval "(unless (package-installed-p 'android-adb) (package-vc-install-from-checkout \"$(ANDROID_ADB_DIR)\" \"android-adb\"))"
 
 lint:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \
