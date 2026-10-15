@@ -387,28 +387,17 @@ When CALLBACK is non-nil, call it with no arguments on success."
 (defun android--launch-app-on-device (device package &optional callback)
   "Launch PACKAGE on DEVICE asynchronously.
 When CALLBACK is non-nil, call it with no arguments on success."
-  (let* ((buf-name (format "*adb launch %s*" package))
-         (buf (get-buffer-create buf-name)))
-    (with-current-buffer buf (erase-buffer))
-    (android--log "launching %s on %s" package device)
-    (make-process
-     :name "adb-launch"
-     :buffer buf
-     :command (android-adb-command device "shell" "monkey" "-p" package
-                                   "-c" "android.intent.category.LAUNCHER" "1")
-     :sentinel
-     (lambda (proc _event)
-       (when (memq (process-status proc) '(exit signal))
-         (let ((output (with-current-buffer (process-buffer proc)
-                         (buffer-string))))
-           (if (and (zerop (process-exit-status proc))
-                    (not (string-match-p "^Error\\|No activities found" output)))
-               (progn
-                 (android--log "launched %s on %s" package device)
-                 (kill-buffer (process-buffer proc))
-                 (when callback (funcall callback)))
-             (pop-to-buffer (process-buffer proc))
-             (error "Error launching %s on %s" package device))))))))
+  (android--log "launching %s" package)
+  (android-adb-launch-package
+   device package
+   (lambda (status output)
+     (if (and (zerop status)
+              (not (string-match-p "^Error\\|No activities found" output)))
+         (progn
+           (android--log "launched %s" package)
+           (when callback (funcall callback)))
+       (message "Error launching %s on %s: %s" device package
+                (string-trim output))))))
 
 (defun android--launch-app (module variant)
   "Launch the app for MODULE and VARIANT on the connected device."
