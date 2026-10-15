@@ -368,27 +368,21 @@ With prefix argument PROMPT, select module and variant again."
 (defun android--install-apk (device apk &optional callback)
   "Install APK on DEVICE asynchronously.
 When CALLBACK is non-nil, call it with no arguments on success."
-  (let* ((buf-name (format "*adb install %s*" (file-name-nondirectory apk)))
-         (buf (get-buffer-create buf-name)))
-    (with-current-buffer buf (erase-buffer))
-    (android--log "installing %s on %s" (file-name-nondirectory apk) device)
-    (make-process
-     :name "adb-install"
-     :buffer buf
-     :command (android-adb-command device "install" "-r" apk)
-     :sentinel
-     (lambda (proc _event)
-       (when (memq (process-status proc) '(exit signal))
-         (let ((output (with-current-buffer (process-buffer proc)
-                         (buffer-string))))
-           (if (and (zerop (process-exit-status proc))
-                    (string-match-p "Success" output))
-               (progn
-                 (android--log "installed %s on %s" (file-name-nondirectory apk) device)
-                 (kill-buffer (process-buffer proc))
-                 (when callback (funcall callback)))
-             (pop-to-buffer (process-buffer proc))
-             (error "Install failed on %s" device))))))))
+  (android--log "installing %s on %s" (file-name-nondirectory apk) device)
+  (android-adb-install-apk
+   device apk
+   (lambda (status output)
+     (let ((buffer (get-buffer
+                    (format "*android-adb-install %s*"
+                            (file-name-nondirectory apk)))))
+       (if (and (zerop status) (string-match-p "Success" output))
+           (progn
+             (android--log "installed %s on %s"
+                           (file-name-nondirectory apk) device)
+             (when (buffer-live-p buffer) (kill-buffer buffer))
+             (when callback (funcall callback)))
+         (when (buffer-live-p buffer) (pop-to-buffer buffer))
+         (error "Install failed on %s" device))))))
 
 (defun android--launch-app-on-device (device package &optional callback)
   "Launch PACKAGE on DEVICE asynchronously.
