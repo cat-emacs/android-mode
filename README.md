@@ -2,8 +2,8 @@
 
 Android project workflow commands for Emacs. Shared metadata lives in
 [android-project](https://github.com/cat-emacs/android-project), device
-communication in [android-adb](https://github.com/cat-emacs/android-adb), and
-screen mirroring in [android-scrcpy](https://github.com/cat-emacs/android-scrcpy).
+communication in [adb](https://github.com/cat-emacs/adb), and
+screen mirroring in [scrcpy](https://github.com/cat-emacs/scrcpy).
 
 `android-mode` provides commands for common Android development tasks:
 
@@ -19,23 +19,23 @@ screen mirroring in [android-scrcpy](https://github.com/cat-emacs/android-scrcpy
 With `use-package` and `package-vc`:
 
 ```elisp
-(use-package android-adb
-  :vc (:url "https://github.com/cat-emacs/android-adb"))
+(use-package adb
+  :vc (:url "https://github.com/cat-emacs/adb"))
 (use-package android-project
   :vc (:url "https://github.com/cat-emacs/android-project"))
 (use-package android-mode
   :vc (:url "https://github.com/cat-emacs/android-mode")
   :commands android-mode)
 ;; Optional screen mirroring:
-(use-package android-scrcpy
-  :vc (:url "https://github.com/cat-emacs/android-scrcpy")
-  :commands android-scrcpy)
+(use-package scrcpy
+  :vc (:url "https://github.com/cat-emacs/scrcpy")
+  :commands scrcpy)
 ```
 
 From a local checkout:
 
 ```elisp
-(add-to-list 'load-path "/path/to/android-adb")
+(add-to-list 'load-path "/path/to/adb")
 (add-to-list 'load-path "/path/to/android-project")
 (add-to-list 'load-path "/path/to/android-mode")
 (require 'android-mode)
@@ -53,8 +53,8 @@ From a local checkout:
 - `M-x android-avd-start`
 - `M-x android-avd-install-system-image`
 - `M-x android-avd`
-- `M-x android-scrcpy`
-- `M-x android-scrcpy-start`
+- `M-x scrcpy`
+- `M-x scrcpy-start`
 - `M-x android-print-flavor`
 - `M-x android-refresh-flavors`
 
@@ -75,7 +75,7 @@ AVD support lives in `android-mode-avd.el` and is loaded on demand, while
 `android-mode.el` remains focused on project, Gradle, application, and device
 workflows.
 
-The optional standalone `android-scrcpy` package opens a Transient menu for selecting a device and configuring
+The optional standalone `scrcpy` package opens a Transient menu for selecting a device and configuring
 video, window, control, input, audio, and recording options. Press `RET` to
 start scrcpy. The same menu can stop or restart sessions, show their process
 output, copy the generated shell command, and inspect displays, encoders, and
@@ -85,8 +85,8 @@ scrcpy is resolved from `exec-path` by default. To use a specific executable or
 pass options that are not exposed in the menu:
 
 ```elisp
-(setq android-scrcpy-program "/path/to/scrcpy"
-      android-scrcpy-extra-arguments '("--verbosity=debug"))
+(setq scrcpy-program "/path/to/scrcpy"
+      scrcpy-extra-arguments '("--verbosity=debug"))
 ```
 
 Multiple sessions may run concurrently when they target different devices.
@@ -149,7 +149,7 @@ relying on `android-mode` internals.
 over `android-mode-sdk-dir`.
 
 The old `android-mode-cache-dir` remains a compatibility alias. Device commands
-resolve adb through `android-adb-program`, exec-path, or SDK fallback, separately
+resolve adb through `adb-program`, exec-path, or SDK fallback, separately
 from SDK tools used by AVD and APK inspection.
 
 Gradle project-model discovery runs asynchronously. Build, install, uninstall,

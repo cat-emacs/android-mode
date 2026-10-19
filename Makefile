@@ -3,8 +3,8 @@ BATCH = $(EMACS) --batch --quick
 TEST_DEPS_DIR ?= .test-deps
 PACKAGE_USER_DIR ?= $(abspath $(TEST_DEPS_DIR)/elpa)
 ANDROID_PROJECT_DIR ?= $(abspath $(TEST_DEPS_DIR)/android-project)
-ANDROID_ADB_DIR ?= $(abspath $(TEST_DEPS_DIR)/android-adb)
-LOAD_PATH = -L . -L "$(ANDROID_PROJECT_DIR)" -L "$(ANDROID_ADB_DIR)"
+ADB_DIR ?= $(abspath $(TEST_DEPS_DIR)/adb)
+LOAD_PATH = -L . -L "$(ANDROID_PROJECT_DIR)" -L "$(ADB_DIR)"
 
 ARCHIVES = --eval "(setq package-user-dir \"$(PACKAGE_USER_DIR)\")" \
            --eval "(require 'package)" \
@@ -27,11 +27,11 @@ install-deps:
 	  --eval "(package-install 'package-lint)"
 	mkdir -p "$(TEST_DEPS_DIR)"
 	test -d "$(ANDROID_PROJECT_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/android-project "$(ANDROID_PROJECT_DIR)"
-	test -d "$(ANDROID_ADB_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/android-adb "$(ANDROID_ADB_DIR)"
+	test -d "$(ADB_DIR)/.git" || git clone --depth 1 https://github.com/cat-emacs/adb "$(ADB_DIR)"
 	$(BATCH) $(ARCHIVES) \
 	  --eval "(require 'package-vc)" \
 	  --eval "(unless (package-installed-p 'android-project) (package-vc-install-from-checkout \"$(ANDROID_PROJECT_DIR)\" \"android-project\"))" \
-	  --eval "(unless (package-installed-p 'android-adb) (package-vc-install-from-checkout \"$(ANDROID_ADB_DIR)\" \"android-adb\"))"
+	  --eval "(unless (package-installed-p 'adb) (package-vc-install-from-checkout \"$(ADB_DIR)\" \"adb\"))"
 
 lint:
 	$(BATCH) $(ARCHIVES) $(LOAD_PATH) \

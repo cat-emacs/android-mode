@@ -7,7 +7,7 @@
 ;; Created: 20 Feb 2009
 ;; Keywords: tools processes
 ;; Version: 0.7.0
-;; Package-Requires: ((emacs "28.1") (transient "0.3.0") (android-project "0.1.0") (android-adb "0.1.0"))
+;; Package-Requires: ((emacs "28.1") (transient "0.3.0") (android-project "0.1.0") (adb "0.1.0"))
 ;; URL: https://github.com/cat-emacs/android-mode
 
 ;; This program is free software; you can redistribute it and/or
@@ -36,7 +36,7 @@
 
 (require 'project)
 (require 'android-project)
-(require 'android-adb)
+(require 'adb)
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
@@ -247,11 +247,11 @@ Uses aapt2 to find the launchable activity from the built APK."
                                 (seq-contains-p launchable current #'string=)
                                 current)
                            (car launchable))))
-        (let* ((device (android-adb-read-device))
+        (let* ((device (adb-read-device))
                (output (if activity
-                           (android-adb-query device "shell" "am" "start" "-n"
+                           (adb-query device "shell" "am" "start" "-n"
                                               (concat package "/" activity))
-                         (android-adb-query device "shell" "monkey" "-p" package
+                         (adb-query device "shell" "monkey" "-p" package
                                             "-c" "android.intent.category.LAUNCHER" "1"))))
           (message "Starting %s" package)
           (when (string-match-p "^Error\\|No activities found" output)
@@ -369,11 +369,11 @@ With prefix argument PROMPT, select module and variant again."
   "Install APK on DEVICE asynchronously.
 When CALLBACK is non-nil, call it with no arguments on success."
   (android--log "installing %s on %s" (file-name-nondirectory apk) device)
-  (android-adb-install-apk
+  (adb-install-apk
    device apk
    (lambda (status output)
      (let ((buffer (get-buffer
-                    (format "*android-adb-install %s*"
+                    (format "*adb-install %s*"
                             (file-name-nondirectory apk)))))
        (if (and (zerop status) (string-match-p "Success" output))
            (progn
@@ -388,7 +388,7 @@ When CALLBACK is non-nil, call it with no arguments on success."
   "Launch PACKAGE on DEVICE asynchronously.
 When CALLBACK is non-nil, call it with no arguments on success."
   (android--log "launching %s" package)
-  (android-adb-launch-package
+  (adb-launch-package
    device package
    (lambda (status output)
      (if (and (zerop status)
@@ -405,7 +405,7 @@ When CALLBACK is non-nil, call it with no arguments on success."
                             :application-id)))
     (unless (and package (not (string-empty-p package)))
       (error "No applicationId for %s:%s" module variant))
-    (android--launch-app-on-device (android-adb-read-device) package)))
+    (android--launch-app-on-device (adb-read-device) package)))
 
 (defun android--compilation-chain (steps)
   "Run build chain items sequentially.
@@ -454,7 +454,7 @@ With prefix argument PROMPT, select module and variant again."
   (let* ((target (android--select-target prompt))
          (module (car target))
          (variant (cdr target))
-         (device (android-adb-read-device))
+         (device (adb-read-device))
          (cap-variant (android--capitalize variant))
          (assemble-task (format ":%s:assemble%s" module cap-variant))
          (package (plist-get (android-project-target module variant) :application-id)))
@@ -487,17 +487,17 @@ With prefix argument PROMPT, select module and variant again."
   "Download and install an Android system image." t)
 (autoload 'android-avd "android-mode-avd"
   "Create and manage Android Virtual Devices." t)
-(autoload 'android-scrcpy-start "android-scrcpy"
+(autoload 'scrcpy-start "scrcpy"
   "Start scrcpy with the current transient arguments." t)
-(autoload 'android-scrcpy "android-scrcpy"
-  "Configure, start, and manage scrcpy (requires android-scrcpy)." t)
+(autoload 'scrcpy "scrcpy"
+  "Configure, start, and manage scrcpy (requires scrcpy)." t)
 (define-obsolete-function-alias
   'android-start-emulator #'android-avd-start "0.8.0")
 
 (defconst android-mode-keys
   '(("a" . android-start-app)
     ("r" . android-run)
-    ("s" . android-scrcpy)
+    ("s" . scrcpy)
     ("e" . android-avd-start)
     ("f" . android-print-flavor)
     ("R" . android-refresh-flavors)
