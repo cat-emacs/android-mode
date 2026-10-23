@@ -124,7 +124,7 @@ and convention-build source files change.
 Target metadata includes a composite-build-safe `:module-id`, `:build-root`,
 Gradle module path, module root, plugin ID, project type, variant, namespace,
 debuggable state, main and instrumentation-test application IDs,
-variant-specific source components and source roots, preview task, build type,
+variant-specific source components and source roots, build type,
 product flavors, and `:selected-p`. Source components distinguish main, Android
 device-test, unit-test, screenshot-test, and test-fixtures ownership. Their
 static Java/Kotlin directories come from AGP's public Variant API; task-produced
@@ -132,7 +132,7 @@ generated directories are not forced during Gradle
 configuration. The default selected
 variant follows Android Studio's ordering: DSL-default build types and flavors,
 then `debug`, then flavor and build-type names. User-selected modules and
-variants are persisted under `android-mode-cache-dir` and remain selected while
+variants are persisted under `android-project-cache-directory` and remain selected while
 they are still available.
 
 These public functions let Logcat and Compose Preview integrations avoid
@@ -148,8 +148,7 @@ relying on `android-mode` internals.
 `ANDROID_HOME` and a project `local.properties` `sdk.dir` value take precedence
 over `android-mode-sdk-dir`.
 
-The old `android-mode-cache-dir` remains a compatibility alias. Device commands
-resolve adb through `adb-program`, exec-path, or SDK fallback, separately
+Device commands resolve adb through `adb-program`, exec-path, or SDK fallback, separately
 from SDK tools used by AVD and APK inspection.
 
 Gradle project-model discovery runs asynchronously. Build, install, uninstall,
